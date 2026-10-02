@@ -157,13 +157,6 @@ export default {
       if (url.pathname.startsWith('/api/')) {
         return await handleApi(request, env, url);
       }
-      // _worker.js "Advanced Mode" takes over ALL routing, including the
-      // clean-URL convenience (/foo -> foo.html) Pages normally provides —
-      // that's gone once this file exists, so handle the couple of paths
-      // people will actually type by hand.
-      if (url.pathname === '/widget') {
-        return Response.redirect(url.origin + '/widget.html', 302);
-      }
       // Everything else (index.html, etc.) — serve as a normal static file.
       return env.ASSETS.fetch(request);
     } catch (err) {
