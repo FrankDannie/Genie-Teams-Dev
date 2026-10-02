@@ -1,0 +1,19 @@
+{
+  "name": "genie-connect-server",
+  "version": "1.0.0",
+  "description": "Backend proxy for the Genie Connect console — keeps the genie API key and IAM token server-side and streams chat responses to the browser.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "PASTE-YOUR-BOT-MICROSOFTAPPID-HERE",
+  "developer": {
+    "name": "Your org name",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Genie Connect",
+    "full": "Genie Connect — Workato Genie bot"
+  },
+  "description": {
+    "short": "Chat with your Workato Genie from Teams",
+    "full": "Connects this Teams bot to a Workato Genie's headless chat API, so you can ask it questions directly from a 1:1 chat."
+  },
+  "accentColor": "#0F766E",
+  "bots": [
+    {
+      "botId": "PASTE-YOUR-BOT-MICROSOFTAPPID-HERE",
+      "scopes": ["personal"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

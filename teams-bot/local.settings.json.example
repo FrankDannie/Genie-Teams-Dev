@@ -1,0 +1,24 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+
+    "_comment_bot_auth": "Managed Identity only works when actually running in Azure. For local testing, use a SingleTenant app registration + password instead — see README 'Local testing' section.",
+    "MicrosoftAppType": "SingleTenant",
+    "MicrosoftAppId": "your-local-test-app-id",
+    "MicrosoftAppPassword": "your-local-test-app-password",
+    "MicrosoftAppTenantId": "your-tenant-id",
+
+    "GENIE_API_KEY": "your-genie-api-key-here",
+    "IAM_API_TOKEN": "your-iam-api-token-here",
+    "GENIE_ID": "gin-AbMAK4r6-rXgonW-CD",
+    "DATA_CENTER": "www.workato.com",
+
+    "BOT_STATE_STORAGE_CONNECTION": "UseDevelopmentStorage=true",
+    "BOT_STATE_CONTAINER": "botstate"
+  },
+  "Host": {
+    "CORS": "*"
+  }
+}

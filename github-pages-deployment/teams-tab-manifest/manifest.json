@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "PASTE-A-FRESH-GUID-HERE",
+  "developer": {
+    "name": "Your org name",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Genie Connect",
+    "full": "Genie Connect — Workato Genie console"
+  },
+  "description": {
+    "short": "Chat with your Workato Genie from Teams",
+    "full": "Loads the Genie Connect web console as a personal Teams tab, so you can chat with your Workato Genie without leaving Teams."
+  },
+  "accentColor": "#0F766E",
+  "staticTabs": [
+    {
+      "entityId": "genieConnectHome",
+      "name": "Genie Connect",
+      "contentUrl": "https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPO/",
+      "websiteUrl": "https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPO/",
+      "scopes": ["personal"]
+    }
+  ],
+  "validDomains": [
+    "YOUR-GITHUB-USERNAME.github.io"
+  ]
+}

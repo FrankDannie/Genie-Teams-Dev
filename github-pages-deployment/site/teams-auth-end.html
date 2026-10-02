@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Finishing sign-in…</title>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/dist/browser/msal-browser.min.js"></script>
+<script src="https://res.cdn.office.net/teams-js/2.19.0/js/MicrosoftTeams.min.js"></script>
+</head>
+<body style="font-family:sans-serif; padding:2rem; color:#3A4150;">
+<p>Completing sign-in…</p>
+<script>
+// Same config as teams-auth-start.html — must match exactly.
+var MSAL_CONFIG = {
+  clientId: 'YOUR-ENTRA-APP-CLIENT-ID',
+  tenantId: 'YOUR-ENTRA-TENANT-ID',
+};
+
+var msalInstance = new msal.PublicClientApplication({
+  auth: {
+    clientId: MSAL_CONFIG.clientId,
+    authority: 'https://login.microsoftonline.com/' + MSAL_CONFIG.tenantId,
+    redirectUri: window.location.origin + window.location.pathname,
+  },
+  cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
+});
+
+microsoftTeams.app.initialize().then(function () {
+  return msalInstance.initialize();
+}).then(function () {
+  return msalInstance.handleRedirectPromise();
+}).then(function (result) {
+  if (result && result.account) {
+    msalInstance.setActiveAccount(result.account);
+  }
+  // Nothing sensitive goes in this payload — the main tab window re-reads
+  // the signed-in account from the shared localStorage MSAL cache itself.
+  microsoftTeams.authentication.notifySuccess('ok');
+}).catch(function (err) {
+  microsoftTeams.authentication.notifyFailure((err && err.message) ? err.message : String(err));
+});
+</script>
+</body>
+</html>

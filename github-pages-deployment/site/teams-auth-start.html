@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Signing in…</title>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/dist/browser/msal-browser.min.js"></script>
+</head>
+<body style="font-family:sans-serif; padding:2rem; color:#3A4150;">
+<p>Redirecting to Microsoft sign-in…</p>
+<script>
+/*
+ * Opened by microsoftTeams.authentication.authenticate() as a standalone
+ * popup window (outside the tab's iframe) — Teams itself creates this
+ * window, so it isn't subject to the browser's "blocked popup from an
+ * iframe" restriction that a plain msalInstance.loginPopup() call would hit.
+ *
+ * Must use the SAME clientId/tenantId as app.js. Keep these in sync.
+ */
+var MSAL_CONFIG = {
+  clientId: 'YOUR-ENTRA-APP-CLIENT-ID',
+  tenantId: 'YOUR-ENTRA-TENANT-ID',
+};
+
+var msalInstance = new msal.PublicClientApplication({
+  auth: {
+    clientId: MSAL_CONFIG.clientId,
+    authority: 'https://login.microsoftonline.com/' + MSAL_CONFIG.tenantId,
+    redirectUri: window.location.origin + window.location.pathname.replace(/teams-auth-start\.html$/, 'teams-auth-end.html'),
+  },
+  cache: {
+    // localStorage, not sessionStorage — this is what lets the main tab
+    // page (a different window, same origin) pick up the signed-in
+    // account after this popup closes.
+    cacheLocation: 'localStorage',
+    storeAuthStateInCookie: false,
+  },
+});
+
+msalInstance.initialize().then(function () {
+  return msalInstance.loginRedirect({ scopes: ['openid', 'profile', 'email', 'User.Read'] });
+}).catch(function (err) {
+  document.body.textContent = 'Sign-in setup failed: ' + (err && err.message ? err.message : err);
+});
+</script>
+</body>
+</html>

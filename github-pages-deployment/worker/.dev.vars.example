@@ -1,0 +1,9 @@
+# Copy this file to ".dev.vars" (same folder) and fill in real values.
+# ".dev.vars" is read automatically by `wrangler dev` for local testing only —
+# it is NOT used in production (production uses `wrangler secret put`, which
+# stores values encrypted on Cloudflare, not in any file).
+#
+# ".dev.vars" is git-ignored — never commit it with real values.
+
+GENIE_API_KEY=your-genie-api-key-here
+IAM_API_TOKEN=your-iam-api-token-here
