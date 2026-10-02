@@ -44,8 +44,15 @@
   var cfg = {
     baseUrl: (thisScript && thisScript.getAttribute('data-base-url')) || '',
     genieId: (thisScript && thisScript.getAttribute('data-genie-id')) || '',
+    dataCenter: (thisScript && thisScript.getAttribute('data-data-center')) || '',
     interfaceName: (thisScript && thisScript.getAttribute('data-interface-name')) || 'Genie Connect',
     idpUserId: (thisScript && thisScript.getAttribute('data-idp-user-id')) || '',
+    // Optional best-effort silent sign-in (e.g. for a SharePoint-embedded page
+    // where the visitor is already signed into Microsoft 365). Only attempted
+    // when both of these are set — otherwise the widget never loads MSAL at
+    // all, keeping the plain drop-in case lightweight.
+    ssoClientId: (thisScript && thisScript.getAttribute('data-sso-client-id')) || '',
+    ssoTenantId: (thisScript && thisScript.getAttribute('data-sso-tenant-id')) || '',
   };
 
   var ROOT_ID = 'genie-widget-root';
@@ -168,6 +175,18 @@
   title.textContent = cfg.interfaceName;
 
   function api(path) { return (cfg.baseUrl || '') + path; }
+  function isValidEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+
+  // Pick up server-configured defaults (genie ID / data center) when the
+  // host page didn't set data-genie-id / data-data-center explicitly.
+  (async function loadDefaults() {
+    try {
+      var res = await fetch(api('/api/health'));
+      var data = await res.json();
+      if (!cfg.genieId && data.defaultGenieId) cfg.genieId = data.defaultGenieId;
+      if (!cfg.dataCenter && data.defaultDataCenter) cfg.dataCenter = data.defaultDataCenter;
+    } catch (e) { /* backend unreachable — widget still works if data attrs were set explicitly */ }
+  })();
 
   function setOpen(open) {
     panel.classList.toggle('open', open);
@@ -183,28 +202,108 @@
     return d.innerHTML;
   }
 
-  function renderEmptyState() {
+  function renderEmptyState(statusLine) {
     var needsId = !state.idpUserId;
     body.innerHTML =
       '<div class="gw-empty" id="gwEmpty">' +
       '  <div class="gw-glyph"><svg viewBox="0 0 24 24" fill="none"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>' +
       (needsId
-        ? '  <h3>Sign in to start</h3><p>Enter your user ID once to start chatting.</p>' +
-          '  <div class="gw-id-field"><input id="gwIdInput" type="text" placeholder="usr_2f8b1c…" spellcheck="false" /><button id="gwIdSubmit" type="button">Start</button></div>'
+        ? '  <h3>Sign in to start</h3><p>Enter your email once to start chatting.</p>' +
+          '  <div class="gw-id-field"><input id="gwIdInput" type="text" placeholder="you@company.com" spellcheck="false" /><button id="gwIdSubmit" type="button">Start</button></div>' +
+          (statusLine ? '  <p style="margin-top:.5rem;font-size:.7rem;color:var(--gw-text-muted);">' + escapeHtml(statusLine) + '</p>' : '')
         : '  <h3>No conversation yet</h3><p>Send a message below to get started.</p>') +
       '</div>';
     if (needsId) {
       var go = function () {
         var v = $('gwIdInput').value.trim();
         if (!v) return;
-        state.idpUserId = v;
-        renderEmptyState();
+        resolveEmailToUserId(v, { silent: false });
       };
       $('gwIdSubmit').addEventListener('click', go);
       $('gwIdInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); go(); } });
     }
   }
   renderEmptyState();
+
+  // ---------------------------------------------------------------------
+  // Email -> X-IDP-User-ID, via the same /api/iam/users lookup the console
+  // uses. `silent` suppresses the on-screen error for a background attempt
+  // (e.g. the SSO auto-identify below) so it fails quietly into the prompt
+  // instead of flashing an alert the visitor never asked to see.
+  // ---------------------------------------------------------------------
+  async function resolveEmailToUserId(email, opts) {
+    opts = opts || {};
+    if (!email || !isValidEmail(email)) {
+      if (!opts.silent) showAlert('Enter a valid email address.');
+      return false;
+    }
+    if (!cfg.dataCenter) {
+      if (!opts.silent) showAlert('No Workato data center configured for this widget (data-data-center).');
+      return false;
+    }
+    if (!opts.silent) {
+      var btn = $('gwIdSubmit');
+      if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    }
+    try {
+      var res = await fetch(api('/api/iam/users?email=' + encodeURIComponent(email) + '&dataCenter=' + encodeURIComponent(cfg.dataCenter)));
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(data.error || ('Lookup failed (' + res.status + ')'));
+      var matches = data.data || [];
+      if (matches.length === 0) {
+        if (!opts.silent) renderEmptyState('No user found for ' + email + ' — confirm they\u2019ve been provisioned in Workspace settings.');
+        return false;
+      }
+      var match = matches[0];
+      if (match.status !== 'active') {
+        if (!opts.silent) renderEmptyState(email + ' was found but isn\u2019t active yet \u2014 they likely still need to accept their workspace invite.');
+        return false;
+      }
+      state.idpUserId = match.id;
+      renderEmptyState();
+      return true;
+    } catch (err) {
+      if (!opts.silent) renderEmptyState(err.message);
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Best-effort silent Microsoft sign-in (only runs when data-sso-client-id
+  // and data-sso-tenant-id are both set — e.g. for the SharePoint full-page
+  // embed). Uses the browser's existing Microsoft 365 session, no popup.
+  // This is genuinely best-effort: browsers that block third-party cookies,
+  // or a host page that further sandboxes this iframe, can make it fail
+  // every time — that's expected, not a bug, and it falls back to the email
+  // prompt above whenever it does.
+  // ---------------------------------------------------------------------
+  async function trySilentSSO() {
+    if (!cfg.ssoClientId || !cfg.ssoTenantId || state.idpUserId) return;
+    try {
+      if (typeof msal === 'undefined') {
+        await new Promise(function (resolve, reject) {
+          var s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/dist/browser/msal-browser.min.js';
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+      var msalInstance = new msal.PublicClientApplication({
+        auth: { clientId: cfg.ssoClientId, authority: 'https://login.microsoftonline.com/' + cfg.ssoTenantId },
+        cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
+      });
+      await msalInstance.initialize();
+      var result = await msalInstance.ssoSilent({ scopes: ['openid', 'profile', 'email'] });
+      var email = result && result.account && (result.account.username || (result.account.idTokenClaims && result.account.idTokenClaims.email));
+      if (email) await resolveEmailToUserId(email, { silent: true });
+    } catch (err) {
+      // Expected to fail often (no existing session, blocked third-party
+      // cookies, nested-iframe sandboxing). The email prompt is already
+      // showing — nothing more to do.
+    }
+  }
+  trySilentSSO();
 
   function renderMessage(role, text) {
     var empty = $('gwEmpty');
@@ -348,6 +447,7 @@
     open: function () { setOpen(true); },
     close: function () { setOpen(false); },
     setUser: function (idpUserId) { state.idpUserId = idpUserId || ''; if (!body.querySelector('.gw-msg')) renderEmptyState(); },
+    setEmail: function (email) { return resolveEmailToUserId(email, { silent: false }); },
     setGenieId: function (genieId) { cfg.genieId = genieId; },
   };
 })();
