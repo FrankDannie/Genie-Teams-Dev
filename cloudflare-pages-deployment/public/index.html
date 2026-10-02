@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Genie Connect — IT ESM Console</title>
+<!-- Teams JS SDK — only does anything when this page is actually running inside a Teams tab -->
+<script src="https://res.cdn.office.net/teams-js/2.19.0/js/MicrosoftTeams.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@200;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1032,13 +1034,26 @@
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
   }
 
-  async function lookupUserByEmail(){
+  function applyLookupMatch(u, sourceLabel){
+    els.idpUserId.value = u.id;
+    lookupEls.resultTag.innerHTML = `
+      <span class="lookup-tag">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Matched via ${escapeHtml(sourceLabel || u.email || '')}
+      </span>`;
+    lookupEls.panel.style.display = 'none';
+    lookupEls.toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg> Look up ID by email';
+    clearAlert();
+  }
+
+  async function lookupUserByEmail(opts){
+    opts = opts || {};
     const dataCenter = lookupEls.dataCenter.value.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
-    const email = lookupEls.email.value.trim();
+    const email = (opts.email || lookupEls.email.value).trim();
 
     lookupEls.results.innerHTML = '';
-    if (!dataCenter){ showAlert('warning', 'Enter your Workato data center host, e.g. app.workato.com.'); return; }
-    if (!email || !isValidEmail(email)){ showAlert('warning', 'Enter a valid email address to look up.'); return; }
+    if (!dataCenter){ if (!opts.silent) showAlert('warning', 'Enter your Workato data center host, e.g. app.workato.com.'); return; }
+    if (!email || !isValidEmail(email)){ if (!opts.silent) showAlert('warning', 'Enter a valid email address to look up.'); return; }
 
     clearAlert();
     lookupEls.submitBtn.disabled = true;
@@ -1056,12 +1071,23 @@
       console.log('[ok]', `200 iam/users → ${matches.length} match(es)`);
 
       if (matches.length === 0){
+        if (opts.silent){
+          // Teams auto-lookup found nothing — fall back to manual entry, no error noise.
+          lookupEls.email.value = email;
+          lookupEls.panel.style.display = 'block';
+          return;
+        }
         lookupEls.results.innerHTML = `<p class="hint">No user found for <strong style="color:var(--text-secondary)">${escapeHtml(email)}</strong>. Confirm they've been provisioned in Workspace settings.</p>`;
+        return;
+      }
+
+      if (matches.length === 1 && opts.autoApply){
+        applyLookupMatch(matches[0], opts.sourceLabel || matches[0].email);
         return;
       }
       renderLookupResults(matches);
     } catch (err){
-      showAlert('danger', escapeHtml(err.message));
+      if (!opts.silent) showAlert('danger', escapeHtml(err.message));
     } finally {
       lookupEls.submitBtn.disabled = false;
       lookupEls.submitLabel.textContent = 'Find user ID';
@@ -1083,29 +1109,45 @@
 
     lookupEls.results.querySelectorAll('.use-id-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        els.idpUserId.value = btn.dataset.id;
-        lookupEls.resultTag.innerHTML = `
-          <span class="lookup-tag">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Matched via ${escapeHtml(btn.dataset.email)}
-          </span>`;
-        lookupEls.panel.style.display = 'none';
-        lookupEls.toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg> Look up ID by email';
-        clearAlert();
+        applyLookupMatch({ id: btn.dataset.id, email: btn.dataset.email });
       });
     });
   }
 
-  lookupEls.submitBtn.addEventListener('click', lookupUserByEmail);
+  lookupEls.submitBtn.addEventListener('click', () => lookupUserByEmail());
   lookupEls.email.addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){ e.preventDefault(); lookupUserByEmail(); }
   });
+
+  // ---------- Teams auto-identify: use the signed-in Teams user's email ----------
+  async function tryTeamsAutoIdentify(){
+    if (typeof microsoftTeams === 'undefined') return;
+    try {
+      await microsoftTeams.app.initialize();
+      const context = await microsoftTeams.app.getContext();
+      const email = (context && context.user && (context.user.userPrincipalName || context.user.loginHint || context.user.id)) || '';
+      if (!email || !isValidEmail(email)) return;
+
+      lookupEls.email.value = email;
+
+      // checkHealth() (below) fills lookupEls.dataCenter from the server's
+      // default once it resolves — wait briefly for that before looking up.
+      for (let i = 0; i < 20 && !lookupEls.dataCenter.value.trim(); i++){
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      await lookupUserByEmail({ email, autoApply: true, silent: true, sourceLabel: `${email} (via Teams)` });
+    } catch (err){
+      // Not running inside Teams, or no user context available — just leaves
+      // the manual "Look up ID by email" panel as the fallback, unchanged.
+    }
+  }
 
   // Initial state
   els.widgetTitle.textContent = els.interfaceName.value;
   setGenieDot(false);
   setConnDot('idle', 'No conversation');
   checkHealth();
+  tryTeamsAutoIdentify();
 })();
 </script>
 </body>
