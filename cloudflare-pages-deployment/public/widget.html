@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Genie Connect</title>
+<style>
+  /* This page has no chrome of its own — it's meant to BE the iframe content
+     in SharePoint's Embed web part, so it fills whatever box you give it. */
+  html, body { margin:0; padding:0; height:100%; background:#F5F7FA; }
+  #genie-widget-root .gw-launcher { display:none !important; } /* no bubble — the whole page is the chat */
+  #genie-widget-root .gw-panel {
+    position:static !important;
+    width:100% !important;
+    height:100vh !important;
+    max-width:none !important;
+    border-radius:0 !important;
+    border:none !important;
+    box-shadow:none !important;
+    opacity:1 !important;
+    transform:none !important;
+    pointer-events:auto !important;
+  }
+</style>
+</head>
+<body>
+<script
+  src="/widget-embed.js"
+  data-interface-name="Lenovo QA Genie"
+  data-sso-client-id=""
+  data-sso-tenant-id=""
+></script>
+</body>
+</html>
