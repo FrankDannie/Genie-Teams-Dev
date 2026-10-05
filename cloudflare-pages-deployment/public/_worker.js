@@ -8,7 +8,7 @@
  * connect this repo in the Cloudflare dashboard once, and every git push
  * rebuilds and redeploys this automatically.
  *
- * GENIE_API_KEY, IAM_API_TOKENare never in this
+ * GENIE_API_KEY and IAM_API_TOKEN are never in this
  * file — they're set as encrypted environment variables in the Pages
  * dashboard (Settings → Environment variables → "Encrypt"), or via
  * `wrangler pages secret put` if you prefer the CLI. Either way, nothing
@@ -44,16 +44,14 @@ function cleanDataCenter(raw, env) {
   return (raw || env.DATA_CENTER || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
-// NOTE — this one function is the part most likely to need adjusting.
-// It's written to the Workato Data Tables REST API shape as I understand
-// it (Bearer token, { data: {...} } envelope, simple query-string
-// filtering on a column name). Once the table exists, open its "API" tab
-// in the Workato UI — it shows the exact request shape for THIS table —
-// and compare against this function; fix anything that differs.
-function dtRecordsUrl(env, dataCenter, suffix) {
-  const dc = cleanDataCenter(dataCenter, env);
-  const tableId = env.DATATABLE_ID; // the "Genie Chat History" table — override with a DATATABLE_ID env var if you ever point this at a different table
-  return `https://${dc}/api/data_tables/${tableId}/records${suffix || ''}`;
+// A Workato API Platform endpoint (built from a recipe), used for both
+// listing and upserting history rows. NOTE — the exact field names this
+// endpoint expects/returns haven't been confirmed against its actual
+// contract; these match the Data Table's own column names as a best
+// guess. A 401 here means the auth header is wrong; a 400 (or a response
+// that just looks "empty"/wrong-shaped) means the field names are wrong.
+function historyApiUrl(env) {
+  return env.HISTORY_API_URL || 'https://apim.workato.com/frankd308/headless-v1/endpoint_path';
 }
 
 async function handleApi(request, env, url) {
@@ -156,12 +154,11 @@ async function handleApi(request, env, url) {
   // ---------------------------------------------------------------
   if (pathname === '/api/history' && request.method === 'GET') {
     const idpUserId = url.searchParams.get('idpUserId');
-    const dataCenter = url.searchParams.get('dataCenter');
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
     if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
 
-    const listUrl = dtRecordsUrl(env, dataCenter, `?idp_user_id=${encodeURIComponent(idpUserId)}`);
+    const listUrl = `${historyApiUrl(env)}?idp_user_id=${encodeURIComponent(idpUserId)}`;
     const upstream = await fetch(listUrl, {
       headers: { Authorization: `Bearer ${env.IAM_API_TOKEN}` },
     });
@@ -174,19 +171,19 @@ async function handleApi(request, env, url) {
 
   // ---------------------------------------------------------------
   // POST /api/history
-  // Upsert one conversation's history row. Looks up by conversation_id
-  // first so re-saving the same conversation updates it instead of
-  // creating duplicate rows.
+  // Upsert one conversation's history row. This endpoint is assumed to
+  // handle find-or-create itself (by conversation_id) on the Workato
+  // side, since only one URL was given for both operations — there's no
+  // separate "update by record id" path to call here.
   // ---------------------------------------------------------------
   if (pathname === '/api/history' && request.method === 'POST') {
     const body = await request.json().catch(() => ({}));
-    const { idpUserId, genieId, conversationId, title, messages, dataCenter } = body;
+    const { idpUserId, genieId, conversationId, title, messages } = body;
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
     if (!conversationId) return json({ error: 'Missing conversationId' }, 400);
     if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
 
-    const headers = { Authorization: `Bearer ${env.IAM_API_TOKEN}`, 'Content-Type': 'application/json' };
     const row = {
       idp_user_id: idpUserId,
       genie_id: genieId || '',
@@ -197,26 +194,18 @@ async function handleApi(request, env, url) {
     };
 
     try {
-      const findUrl = dtRecordsUrl(env, dataCenter, `?conversation_id=${encodeURIComponent(conversationId)}`);
-      const findRes = await fetch(findUrl, { headers });
-      const findData = await findRes.json().catch(() => ({}));
-      const existing = (findData.data || findData.records || [])[0];
-
-      const upstream = existing
-        ? await fetch(dtRecordsUrl(env, dataCenter, `/${existing.id}`), {
-            method: 'PUT', headers, body: JSON.stringify({ data: row }),
-          })
-        : await fetch(dtRecordsUrl(env, dataCenter), {
-            method: 'POST', headers, body: JSON.stringify({ data: row }),
-          });
-
+      const upstream = await fetch(historyApiUrl(env), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${env.IAM_API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(row),
+      });
       const text = await upstream.text();
       return new Response(text, {
         status: upstream.status,
         headers: { 'Content-Type': upstream.headers.get('content-type') || 'application/json' },
       });
     } catch (err) {
-      return json({ error: 'Data table request failed', detail: err.message }, 502);
+      return json({ error: 'History API request failed', detail: err.message }, 502);
     }
   }
 
@@ -228,7 +217,7 @@ async function handleApi(request, env, url) {
       ok: true,
       genieApiKeyConfigured: Boolean(env.GENIE_API_KEY),
       iamTokenConfigured: Boolean(env.IAM_API_TOKEN),
-      dataTableConfigured: Boolean(env.IAM_API_TOKEN), 
+      dataTableConfigured: Boolean(env.IAM_API_TOKEN), // DATATABLE_ID defaults to 155843 if unset
       defaultGenieId: env.GENIE_ID || null,
       defaultDataCenter: env.DATA_CENTER || null,
     });
