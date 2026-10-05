@@ -7,7 +7,7 @@
  *     src="https://YOUR-GENIE-CONNECT-HOST/widget-embed.js"
  *     data-base-url="https://YOUR-GENIE-CONNECT-HOST"
  *     data-genie-id="gin-AbMAK4r6-rXgonW-CD"
- *     data-interface-name="Smart Genie"
+ *     data-interface-name="Lenovo QA Genie"
  *     data-idp-user-id=""
  *   ></script>
  *
@@ -31,6 +31,15 @@
  *   window.GenieWidget.setUser("usr_2f8b1c...");
  *   window.GenieWidget.open();
  *   window.GenieWidget.close();
+ *
+ * Chat history: each conversation (id + its messages) is saved to this
+ * browser's localStorage, keyed by genie ID — there is no server-side
+ * history store. That's deliberate: it needs no database, no per-user
+ * accounts, and no extra backend work, at the cost of history being
+ * per-browser rather than synced across devices. Reopening a past
+ * conversation from the sidebar resumes the SAME upstream conversationId,
+ * so the Genie still has all the prior context — it's not just a local
+ * transcript, you can keep chatting in it.
  *
  * Note on Microsoft Entra's "My Apps" portal itself: that portal only
  * launches/links to registered app URLs — it has no mechanism to host a
@@ -64,72 +73,91 @@
   // ---------------------------------------------------------------------
   // Styles — scoped under #genie-widget-root so nothing leaks into, or is
   // affected by, the host page's own CSS.
+  //
+  // Deliberately plain/neutral palette (grays + one muted blue accent,
+  // system font stack, no Google Fonts import) so this doesn't visually
+  // clash sitting inside SharePoint or a Chrome side panel — both use
+  // similar light, low-saturation, system-font UI by default.
   // ---------------------------------------------------------------------
-  var fontLink = document.createElement('link');
-  fontLink.rel = 'stylesheet';
-  fontLink.href = 'https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap';
-  document.head.appendChild(fontLink);
-
   var style = document.createElement('style');
   style.textContent = [
     '#' + ROOT_ID + '{',
-    '  --gw-teal:#0D9488; --gw-teal-mid:#0F766E; --gw-teal-soft:#CCFBF1;',
-    '  --gw-card:#FFFFFF; --gw-surface-2:#F5F7FA; --gw-border:#DDE3EA; --gw-border-light:#E7EBF0;',
-    '  --gw-text:#101828; --gw-text-secondary:#3A4150; --gw-text-muted:#8993A3;',
-    '  --gw-success:#059669; --gw-danger:#DC2626; --gw-warning:#B45309;',
-    '  --gw-sans:"Poppins",sans-serif; --gw-mono:"JetBrains Mono",monospace;',
+    '  --gw-primary:#2F6FED; --gw-primary-mid:#2558C4; --gw-primary-soft:#EAF1FE;',
+    '  --gw-card:#FFFFFF; --gw-surface-2:#F6F7F8; --gw-border:#E1E3E6; --gw-border-light:#ECEDEF;',
+    '  --gw-text:#1F2328; --gw-text-secondary:#3D4350; --gw-text-muted:#8A9099;',
+    '  --gw-success:#2E8B57; --gw-danger:#C44141; --gw-warning:#A5690C;',
+    '  --gw-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
+    '  --gw-mono:ui-monospace,SFMono-Regular,"Segoe UI Mono",Consolas,monospace;',
     '  font-family:var(--gw-sans); color:var(--gw-text); box-sizing:border-box;',
     '}',
     '#' + ROOT_ID + ' *{box-sizing:border-box;}',
-    '#' + ROOT_ID + ' .gw-launcher{position:fixed; right:1.5rem; bottom:1.5rem; z-index:2147483000; width:54px; height:54px; border-radius:50%; border:none; cursor:pointer; background:linear-gradient(135deg,#0D9488,#0F766E); color:#fff; display:flex; align-items:center; justify-content:center; box-shadow:0 8px 24px rgba(15,118,110,0.35); transition:transform .15s ease;}',
-    '#' + ROOT_ID + ' .gw-launcher:hover{transform:translateY(-2px) scale(1.03);}',
+    '#' + ROOT_ID + ' .gw-launcher{position:fixed; right:1.5rem; bottom:1.5rem; z-index:2147483000; width:54px; height:54px; border-radius:50%; border:1px solid var(--gw-border); cursor:pointer; background:var(--gw-primary); color:#fff; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(0,0,0,0.18); transition:transform .15s ease;}',
+    '#' + ROOT_ID + ' .gw-launcher:hover{transform:translateY(-2px);}',
     '#' + ROOT_ID + ' .gw-launcher svg{width:24px; height:24px;}',
     '#' + ROOT_ID + ' .gw-launcher .gw-close-icon{display:none;}',
     '#' + ROOT_ID + ' .gw-launcher.open .gw-chat-icon{display:none;}',
     '#' + ROOT_ID + ' .gw-launcher.open .gw-close-icon{display:block;}',
     '#' + ROOT_ID + ' .gw-ping{position:absolute; top:-2px; right:-2px; width:11px; height:11px; border-radius:50%; background:var(--gw-success); border:2px solid #fff; display:none;}',
     '#' + ROOT_ID + ' .gw-ping.show{display:block;}',
-    '#' + ROOT_ID + ' .gw-panel{position:fixed; right:1.5rem; bottom:5.5rem; z-index:2147482999; width:380px; max-width:calc(100vw - 2.5rem); height:min(600px, calc(100vh - 8rem)); background:var(--gw-card); border:1px solid var(--gw-border-light); border-radius:0.75rem; box-shadow:0 20px 48px rgba(16,24,40,0.18); display:flex; flex-direction:column; overflow:hidden; transform:translateY(12px) scale(0.98); opacity:0; pointer-events:none; transition:transform .18s ease, opacity .18s ease;}',
+    '#' + ROOT_ID + ' .gw-panel{position:fixed; right:1.5rem; bottom:5.5rem; z-index:2147482999; width:380px; max-width:calc(100vw - 2.5rem); height:min(600px, calc(100vh - 8rem)); background:var(--gw-card); border:1px solid var(--gw-border); border-radius:0.5rem; box-shadow:0 12px 32px rgba(0,0,0,0.16); display:flex; flex-direction:column; overflow:hidden; transform:translateY(12px) scale(0.98); opacity:0; pointer-events:none; transition:transform .18s ease, opacity .18s ease;}',
     '#' + ROOT_ID + ' .gw-panel.open{transform:translateY(0) scale(1); opacity:1; pointer-events:auto;}',
-    '#' + ROOT_ID + ' .gw-head{padding:1rem 1.1rem; border-bottom:1px solid var(--gw-border-light); display:flex; align-items:center; justify-content:space-between; gap:.75rem; background:linear-gradient(180deg, var(--gw-teal-soft), transparent); flex-shrink:0;}',
-    '#' + ROOT_ID + ' .gw-head h4{margin:0; font-size:.88rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
-    '#' + ROOT_ID + ' .gw-head-actions{display:flex; align-items:center; gap:.3rem; flex-shrink:0;}',
-    '#' + ROOT_ID + ' .gw-icon-btn{background:transparent; border:1px solid transparent; color:var(--gw-text-muted); width:1.9rem; height:1.9rem; border-radius:.25rem; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all .15s ease;}',
-    '#' + ROOT_ID + ' .gw-icon-btn:hover{color:var(--gw-teal-mid); background:rgba(13,148,136,.08);}',
+    '#' + ROOT_ID + ' .gw-head{padding:.85rem 1rem; border-bottom:1px solid var(--gw-border); display:flex; align-items:center; justify-content:space-between; gap:.6rem; background:var(--gw-surface-2); flex-shrink:0;}',
+    '#' + ROOT_ID + ' .gw-head-left{display:flex; align-items:center; gap:.4rem; min-width:0;}',
+    '#' + ROOT_ID + ' .gw-head h4{margin:0; font-size:.86rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+    '#' + ROOT_ID + ' .gw-head-actions{display:flex; align-items:center; gap:.2rem; flex-shrink:0;}',
+    '#' + ROOT_ID + ' .gw-icon-btn{background:transparent; border:1px solid transparent; color:var(--gw-text-muted); width:1.85rem; height:1.85rem; border-radius:.25rem; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all .15s ease;}',
+    '#' + ROOT_ID + ' .gw-icon-btn:hover{color:var(--gw-text); background:var(--gw-border-light);}',
+    '#' + ROOT_ID + ' .gw-icon-btn.active{color:var(--gw-primary); background:var(--gw-primary-soft);}',
     '#' + ROOT_ID + ' .gw-icon-btn svg{width:15px; height:15px;}',
-    '#' + ROOT_ID + ' .gw-body{flex:1; overflow-y:auto; padding:1.1rem; display:flex; flex-direction:column; gap:1rem; background:var(--gw-surface-2);}',
-    '#' + ROOT_ID + ' .gw-empty{margin:auto; text-align:center; max-width:280px; color:var(--gw-text-muted); display:flex; flex-direction:column; align-items:center; gap:.8rem;}',
-    '#' + ROOT_ID + ' .gw-empty .gw-glyph{width:46px; height:46px; border-radius:12px; background:var(--gw-teal-soft); border:1px solid rgba(13,148,136,.25); display:flex; align-items:center; justify-content:center;}',
-    '#' + ROOT_ID + ' .gw-empty .gw-glyph svg{width:21px; height:21px; color:var(--gw-teal-mid);}',
-    '#' + ROOT_ID + ' .gw-empty h3{color:var(--gw-text-secondary); font-size:.86rem; font-weight:600; margin:0;}',
-    '#' + ROOT_ID + ' .gw-empty p{font-size:.74rem; line-height:1.55; margin:0;}',
+    '#' + ROOT_ID + ' .gw-main{flex:1; display:flex; position:relative; overflow:hidden; min-height:0;}',
+    '#' + ROOT_ID + ' .gw-sidebar{position:absolute; top:0; left:0; bottom:0; width:230px; max-width:82%; background:var(--gw-surface-2); border-right:1px solid var(--gw-border); display:flex; flex-direction:column; transform:translateX(-100%); transition:transform .18s ease; z-index:3;}',
+    '#' + ROOT_ID + ' .gw-sidebar.open{transform:translateX(0);}',
+    '#' + ROOT_ID + ' .gw-sidebar-head{display:flex; align-items:center; justify-content:space-between; padding:.7rem .75rem; border-bottom:1px solid var(--gw-border); flex-shrink:0;}',
+    '#' + ROOT_ID + ' .gw-sidebar-head span{font-size:.72rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:var(--gw-text-muted);}',
+    '#' + ROOT_ID + ' .gw-new-chat{display:flex; align-items:center; gap:.3rem; background:var(--gw-card); border:1px solid var(--gw-border); color:var(--gw-text-secondary); font-size:.68rem; font-weight:600; padding:.3rem .55rem; border-radius:.3rem; cursor:pointer;}',
+    '#' + ROOT_ID + ' .gw-new-chat:hover{background:var(--gw-border-light);}',
+    '#' + ROOT_ID + ' .gw-new-chat svg{width:12px; height:12px;}',
+    '#' + ROOT_ID + ' .gw-sidebar-list{flex:1; overflow-y:auto; padding:.4rem;}',
+    '#' + ROOT_ID + ' .gw-history-empty{padding:.6rem; font-size:.72rem; color:var(--gw-text-muted); line-height:1.5;}',
+    '#' + ROOT_ID + ' .gw-history-item{padding:.5rem .55rem; border-radius:.3rem; cursor:pointer; margin-bottom:.15rem;}',
+    '#' + ROOT_ID + ' .gw-history-item:hover{background:var(--gw-border-light);}',
+    '#' + ROOT_ID + ' .gw-history-item.active{background:var(--gw-primary-soft);}',
+    '#' + ROOT_ID + ' .gw-history-item .t{font-size:.76rem; font-weight:500; color:var(--gw-text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+    '#' + ROOT_ID + ' .gw-history-item.active .t{color:var(--gw-primary-mid);}',
+    '#' + ROOT_ID + ' .gw-history-item .d{font-size:.64rem; color:var(--gw-text-muted); margin-top:.1rem;}',
+    '#' + ROOT_ID + ' .gw-body{flex:1; overflow-y:auto; padding:1rem; display:flex; flex-direction:column; gap:.9rem; background:var(--gw-card); min-width:0;}',
+    '#' + ROOT_ID + ' .gw-empty{margin:auto; text-align:center; max-width:280px; color:var(--gw-text-muted); display:flex; flex-direction:column; align-items:center; gap:.7rem;}',
+    '#' + ROOT_ID + ' .gw-empty .gw-glyph{width:42px; height:42px; border-radius:10px; background:var(--gw-surface-2); border:1px solid var(--gw-border); display:flex; align-items:center; justify-content:center;}',
+    '#' + ROOT_ID + ' .gw-empty .gw-glyph svg{width:19px; height:19px; color:var(--gw-text-muted);}',
+    '#' + ROOT_ID + ' .gw-empty h3{color:var(--gw-text-secondary); font-size:.84rem; font-weight:600; margin:0;}',
+    '#' + ROOT_ID + ' .gw-empty p{font-size:.73rem; line-height:1.5; margin:0;}',
     '#' + ROOT_ID + ' .gw-id-field{display:flex; gap:.4rem; margin-top:.3rem; width:100%;}',
-    '#' + ROOT_ID + ' .gw-id-field input{flex:1; min-width:0; background:#fff; border:1px solid var(--gw-border); color:var(--gw-text); font-family:var(--gw-mono); font-size:.76rem; padding:.5rem .6rem; border-radius:.375rem;}',
-    '#' + ROOT_ID + ' .gw-id-field input:focus{outline:none; border-color:var(--gw-teal); box-shadow:0 0 0 3px rgba(13,148,136,.12);}',
-    '#' + ROOT_ID + ' .gw-id-field button{flex-shrink:0; background:linear-gradient(135deg,#0D9488,#0F766E); color:#fff; border:none; border-radius:.375rem; font-size:.74rem; font-weight:600; padding:0 .8rem; cursor:pointer;}',
-    '#' + ROOT_ID + ' .gw-msg{display:flex; gap:.6rem; max-width:88%;}',
+    '#' + ROOT_ID + ' .gw-id-field input{flex:1; min-width:0; background:#fff; border:1px solid var(--gw-border); color:var(--gw-text); font-size:.76rem; padding:.5rem .6rem; border-radius:.3rem;}',
+    '#' + ROOT_ID + ' .gw-id-field input:focus{outline:none; border-color:var(--gw-primary); box-shadow:0 0 0 3px var(--gw-primary-soft);}',
+    '#' + ROOT_ID + ' .gw-id-field button{flex-shrink:0; background:var(--gw-primary); color:#fff; border:none; border-radius:.3rem; font-size:.74rem; font-weight:600; padding:0 .8rem; cursor:pointer;}',
+    '#' + ROOT_ID + ' .gw-msg{display:flex; gap:.55rem; max-width:88%;}',
     '#' + ROOT_ID + ' .gw-msg.user{align-self:flex-end; flex-direction:row-reverse;}',
-    '#' + ROOT_ID + ' .gw-msg-avatar{flex-shrink:0; width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:.6rem; font-weight:700; font-family:var(--gw-mono); margin-top:.1rem;}',
-    '#' + ROOT_ID + ' .gw-msg.assistant .gw-msg-avatar{background:var(--gw-teal-soft); border:1px solid rgba(13,148,136,.3); color:var(--gw-teal-mid);}',
-    '#' + ROOT_ID + ' .gw-msg.user .gw-msg-avatar{background:rgba(124,58,237,.1); border:1px solid rgba(124,58,237,.28); color:#6d28d9;}',
-    '#' + ROOT_ID + ' .gw-msg-bubble{padding:.6rem .8rem; border-radius:.5rem; font-size:.82rem; line-height:1.55; color:var(--gw-text-secondary); white-space:pre-wrap; word-break:break-word;}',
-    '#' + ROOT_ID + ' .gw-msg.assistant .gw-msg-bubble{background:#fff; border:1px solid var(--gw-border-light); border-top-left-radius:.2rem;}',
-    '#' + ROOT_ID + ' .gw-msg.user .gw-msg-bubble{background:rgba(124,58,237,.08); border:1px solid rgba(124,58,237,.2); border-top-right-radius:.2rem; color:var(--gw-text);}',
+    '#' + ROOT_ID + ' .gw-msg-avatar{flex-shrink:0; width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:.58rem; font-weight:700; margin-top:.1rem;}',
+    '#' + ROOT_ID + ' .gw-msg.assistant .gw-msg-avatar{background:var(--gw-surface-2); border:1px solid var(--gw-border); color:var(--gw-text-secondary);}',
+    '#' + ROOT_ID + ' .gw-msg.user .gw-msg-avatar{background:var(--gw-primary-soft); border:1px solid var(--gw-primary-soft); color:var(--gw-primary-mid);}',
+    '#' + ROOT_ID + ' .gw-msg-bubble{padding:.55rem .75rem; border-radius:.45rem; font-size:.82rem; line-height:1.5; color:var(--gw-text-secondary); white-space:pre-wrap; word-break:break-word;}',
+    '#' + ROOT_ID + ' .gw-msg.assistant .gw-msg-bubble{background:var(--gw-surface-2); border:1px solid var(--gw-border-light); border-top-left-radius:.2rem;}',
+    '#' + ROOT_ID + ' .gw-msg.user .gw-msg-bubble{background:var(--gw-primary-soft); border:1px solid var(--gw-primary-soft); border-top-right-radius:.2rem; color:var(--gw-text);}',
     '#' + ROOT_ID + ' .gw-typing{display:inline-flex; gap:3px; align-items:center; padding:.2rem 0;}',
-    '#' + ROOT_ID + ' .gw-typing span{width:5px; height:5px; border-radius:50%; background:var(--gw-teal-mid); animation:gw-bounce 1.2s infinite ease-in-out;}',
+    '#' + ROOT_ID + ' .gw-typing span{width:5px; height:5px; border-radius:50%; background:var(--gw-text-muted); animation:gw-bounce 1.2s infinite ease-in-out;}',
     '#' + ROOT_ID + ' .gw-typing span:nth-child(2){animation-delay:.15s;}',
     '#' + ROOT_ID + ' .gw-typing span:nth-child(3){animation-delay:.3s;}',
     '@keyframes gw-bounce{0%,80%,100%{transform:translateY(0); opacity:.4;} 40%{transform:translateY(-4px); opacity:1;}}',
-    '#' + ROOT_ID + ' .gw-footer{padding:.85rem 1rem 1rem; border-top:1px solid var(--gw-border-light); flex-shrink:0; background:var(--gw-card);}',
-    '#' + ROOT_ID + ' .gw-composer{display:flex; align-items:flex-end; gap:.5rem; background:var(--gw-surface-2); border:1px solid var(--gw-border); border-radius:.5rem; padding:.4rem .5rem; transition:border-color .15s ease;}',
-    '#' + ROOT_ID + ' .gw-composer:focus-within{border-color:var(--gw-teal); box-shadow:0 0 0 3px rgba(13,148,136,.12);}',
-    '#' + ROOT_ID + ' .gw-composer textarea{flex:1; border:none; background:transparent; resize:none; font-family:var(--gw-sans); font-size:.82rem; color:var(--gw-text); max-height:100px; padding:.35rem;}',
+    '#' + ROOT_ID + ' .gw-footer{padding:.75rem .9rem .9rem; border-top:1px solid var(--gw-border); flex-shrink:0; background:var(--gw-card);}',
+    '#' + ROOT_ID + ' .gw-composer{display:flex; align-items:flex-end; gap:.5rem; background:var(--gw-surface-2); border:1px solid var(--gw-border); border-radius:.4rem; padding:.35rem .45rem; transition:border-color .15s ease;}',
+    '#' + ROOT_ID + ' .gw-composer:focus-within{border-color:var(--gw-primary); box-shadow:0 0 0 3px var(--gw-primary-soft);}',
+    '#' + ROOT_ID + ' .gw-composer textarea{flex:1; border:none; background:transparent; resize:none; font-family:var(--gw-sans); font-size:.82rem; color:var(--gw-text); max-height:100px; padding:.3rem;}',
     '#' + ROOT_ID + ' .gw-composer textarea:focus{outline:none;}',
-    '#' + ROOT_ID + ' .gw-send{width:2.1rem; height:2.1rem; border-radius:.375rem; flex-shrink:0; background:linear-gradient(135deg,#0D9488,#0F766E); border:none; color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer;}',
+    '#' + ROOT_ID + ' .gw-send{width:2rem; height:2rem; border-radius:.3rem; flex-shrink:0; background:var(--gw-primary); border:none; color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer;}',
     '#' + ROOT_ID + ' .gw-send:disabled{opacity:.35; cursor:not-allowed;}',
-    '#' + ROOT_ID + ' .gw-send svg{width:15px; height:15px;}',
-    '#' + ROOT_ID + ' .gw-foot-row{display:flex; justify-content:space-between; align-items:center; margin-top:.5rem; font-size:.65rem; color:var(--gw-text-muted); font-family:var(--gw-mono);}',
-    '#' + ROOT_ID + ' .gw-alert{display:flex; gap:.5rem; padding:.6rem .75rem; border-radius:.375rem; font-size:.74rem; line-height:1.5; margin-bottom:.75rem; border:1px solid rgba(220,38,38,.22); background:rgba(220,38,38,.06); color:#b91c1c;}',
+    '#' + ROOT_ID + ' .gw-send svg{width:14px; height:14px;}',
+    '#' + ROOT_ID + ' .gw-foot-row{display:flex; justify-content:space-between; align-items:center; margin-top:.45rem; font-size:.64rem; color:var(--gw-text-muted);}',
+    '#' + ROOT_ID + ' .gw-alert{display:flex; gap:.5rem; padding:.55rem .7rem; border-radius:.3rem; font-size:.73rem; line-height:1.45; margin-bottom:.7rem; border:1px solid var(--gw-danger); background:#FBEDED; color:var(--gw-danger);}',
   ].join('\n');
   document.head.appendChild(style);
 
@@ -146,13 +174,25 @@
     '</button>',
     '<div class="gw-panel" id="gwPanel">',
     '  <div class="gw-head">',
-    '    <h4 id="gwTitle"></h4>',
+    '    <div class="gw-head-left">',
+    '      <button class="gw-icon-btn" id="gwHistoryBtn" type="button" title="Chat history" aria-label="Chat history"><svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>',
+    '      <h4 id="gwTitle"></h4>',
+    '    </div>',
     '    <div class="gw-head-actions">',
-    '      <button class="gw-icon-btn" id="gwResetBtn" type="button" title="Reset session"><svg viewBox="0 0 24 24" fill="none"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>',
+    '      <button class="gw-icon-btn" id="gwNewChatBtn" type="button" title="New chat"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>',
     '      <button class="gw-icon-btn" id="gwCloseBtn" type="button" title="Close chat" aria-label="Close chat"><svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>',
     '    </div>',
     '  </div>',
-    '  <div class="gw-body" id="gwBody"></div>',
+    '  <div class="gw-main">',
+    '    <div class="gw-sidebar" id="gwSidebar">',
+    '      <div class="gw-sidebar-head">',
+    '        <span>History</span>',
+    '        <button class="gw-new-chat" id="gwSidebarNewChatBtn" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>New</button>',
+    '      </div>',
+    '      <div class="gw-sidebar-list" id="gwSidebarList"></div>',
+    '    </div>',
+    '    <div class="gw-body" id="gwBody"></div>',
+    '  </div>',
     '  <div class="gw-footer">',
     '    <div id="gwAlertSlot"></div>',
     '    <form class="gw-composer" id="gwComposerForm">',
@@ -170,11 +210,12 @@
   // ---------------------------------------------------------------------
   var $ = function (id) { return document.getElementById(id); };
   var launcher = $('gwLauncher'), panel = $('gwPanel'), ping = $('gwPing');
+  var sidebar = $('gwSidebar'), sidebarList = $('gwSidebarList');
   var body = $('gwBody'), title = $('gwTitle');
   var form = $('gwComposerForm'), input = $('gwInput'), sendBtn = $('gwSendBtn');
   var streamState = $('gwStreamState'), alertSlot = $('gwAlertSlot');
 
-  var state = { conversationId: null, sending: false, idpUserId: cfg.idpUserId || '' };
+  var state = { conversationId: null, sending: false, idpUserId: cfg.idpUserId || '', messages: [], historyTitle: '' };
   title.textContent = cfg.interfaceName;
 
   function api(path) { return (cfg.baseUrl || '') + path; }
@@ -184,6 +225,91 @@
       return new URLSearchParams(window.location.search).get('email') || '';
     } catch (e) { return ''; }
   }
+
+  // ---------------------------------------------------------------------
+  // Chat history — localStorage only, keyed per genie. See the file-level
+  // comment at the top for why this is client-side rather than a backend
+  // history store.
+  // ---------------------------------------------------------------------
+  var HISTORY_KEY = 'genieWidgetHistory:' + (cfg.genieId || 'default');
+  var history = [];
+  try { history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch (e) { history = []; }
+
+  function saveHistory() {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 50))); } catch (e) { /* storage unavailable/full — history just won't persist */ }
+  }
+
+  function upsertHistory() {
+    if (!state.conversationId || state.messages.length === 0) return;
+    var idx = -1;
+    for (var i = 0; i < history.length; i++) { if (history[i].id === state.conversationId) { idx = i; break; } }
+    var entry = {
+      id: state.conversationId,
+      title: state.historyTitle || (idx >= 0 ? history[idx].title : 'New chat'),
+      updatedAt: new Date().toISOString(),
+      messages: state.messages,
+    };
+    if (idx >= 0) history.splice(idx, 1);
+    history.unshift(entry);
+    history = history.slice(0, 50);
+    saveHistory();
+    renderHistoryList();
+  }
+
+  function renderHistoryList() {
+    if (history.length === 0) {
+      sidebarList.innerHTML = '<p class="gw-history-empty">No past chats yet — conversations you have show up here.</p>';
+      return;
+    }
+    sidebarList.innerHTML = history.map(function (c) {
+      var active = c.id === state.conversationId ? ' active' : '';
+      var when = new Date(c.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return '<div class="gw-history-item' + active + '" data-id="' + escapeHtml(c.id) + '">' +
+        '<div class="t">' + escapeHtml(c.title) + '</div>' +
+        '<div class="d">' + escapeHtml(when) + '</div></div>';
+    }).join('');
+    var items = sidebarList.querySelectorAll('.gw-history-item');
+    for (var i = 0; i < items.length; i++) {
+      items[i].addEventListener('click', function () {
+        var id = this.getAttribute('data-id');
+        for (var j = 0; j < history.length; j++) {
+          if (history[j].id === id) { openHistoryItem(history[j]); break; }
+        }
+      });
+    }
+  }
+
+  function openHistoryItem(entry) {
+    state.conversationId = entry.id;
+    state.messages = entry.messages.slice();
+    state.historyTitle = entry.title;
+    body.innerHTML = '';
+    for (var i = 0; i < state.messages.length; i++) {
+      paintMessage(state.messages[i].role, state.messages[i].text);
+    }
+    setSidebarOpen(false);
+    renderHistoryList();
+  }
+
+  function startNewChat() {
+    state.conversationId = null;
+    state.messages = [];
+    state.historyTitle = '';
+    streamState.textContent = 'Idle';
+    clearAlert();
+    renderEmptyState();
+    setSidebarOpen(false);
+    renderHistoryList();
+  }
+
+  function setSidebarOpen(open) {
+    sidebar.classList.toggle('open', open);
+    $('gwHistoryBtn').classList.toggle('active', open);
+  }
+  $('gwHistoryBtn').addEventListener('click', function () { setSidebarOpen(!sidebar.classList.contains('open')); });
+  $('gwNewChatBtn').addEventListener('click', startNewChat);
+  $('gwSidebarNewChatBtn').addEventListener('click', startNewChat);
+  renderHistoryList();
 
   // Pick up server-configured defaults (genie ID / data center) when the
   // host page didn't set data-genie-id / data-data-center explicitly. This
@@ -322,8 +448,7 @@
   // or a data-user-email attribute is the most reliable signal of all, since
   // it needs no cookies or SSO session. Only fall back to best-effort silent
   // SSO when neither is present. Both wait for defaultsReady first, since
-  // resolveEmailToUserId needs cfg.dataCenter — this ordering is the actual
-  // fix for the "auto-identify sometimes silently does nothing" symptom.
+  // resolveEmailToUserId needs cfg.dataCenter.
   (async function identify() {
     await defaultsReady;
     var knownEmail = cfg.userEmail || getQueryEmail();
@@ -334,7 +459,11 @@
     }
   })();
 
-  function renderMessage(role, text) {
+  // paintMessage does DOM only, no state — used both for live messages
+  // (via renderMessage below, which also records to state.messages for
+  // history) and for replaying a past conversation loaded from the
+  // sidebar (where state.messages is already set from storage).
+  function paintMessage(role, text) {
     var empty = $('gwEmpty');
     if (empty) empty.remove();
     var wrap = document.createElement('div');
@@ -346,6 +475,11 @@
     var bubble = wrap.querySelector('.gw-msg-bubble');
     bubble.textContent = text;
     body.scrollTop = body.scrollHeight;
+    return bubble;
+  }
+  function renderMessage(role, text) {
+    var bubble = paintMessage(role, text);
+    state.messages.push({ role: role, text: text });
     return bubble;
   }
   function renderTyping() {
@@ -427,6 +561,8 @@
     var genieId = cfg.genieId;
     if (!genieId) { showAlert('No Genie ID configured for this widget (data-genie-id).'); return; }
 
+    if (!state.historyTitle) state.historyTitle = message.length > 40 ? message.slice(0, 40) + '…' : message;
+
     clearAlert();
     state.sending = true;
     sendBtn.disabled = true;
@@ -442,16 +578,24 @@
       renderTyping();
       streamState.textContent = 'Streaming response…';
       var bubble = null;
+      var assistantMsgIndex = -1;
       await sendMessageStream(genieId, state.idpUserId, state.conversationId, message, function (fullText) {
         removeTyping();
-        if (!bubble) bubble = renderMessage('assistant', '');
+        if (!bubble) {
+          bubble = renderMessage('assistant', '');
+          assistantMsgIndex = state.messages.length - 1;
+        }
         bubble.textContent = fullText;
+        if (assistantMsgIndex >= 0) state.messages[assistantMsgIndex].text = fullText;
         body.scrollTop = body.scrollHeight;
       });
       removeTyping();
-      if (!bubble) renderMessage('assistant', '(No content returned. Check that the genie is running.)');
+      if (!bubble) {
+        renderMessage('assistant', '(No content returned. Check that the genie is running.)');
+      }
       streamState.textContent = 'Idle';
       if (!panel.classList.contains('open')) ping.classList.add('show');
+      upsertHistory();
     } catch (err) {
       removeTyping();
       streamState.textContent = 'Error';
@@ -462,13 +606,6 @@
     }
   }
 
-  $('gwResetBtn').addEventListener('click', function () {
-    state.conversationId = null;
-    streamState.textContent = 'Idle';
-    clearAlert();
-    renderEmptyState();
-  });
-
   // ---------------------------------------------------------------------
   // Public API for the host page
   // ---------------------------------------------------------------------
@@ -478,5 +615,6 @@
     setUser: function (idpUserId) { state.idpUserId = idpUserId || ''; if (!body.querySelector('.gw-msg')) renderEmptyState(); },
     setEmail: function (email) { return resolveEmailToUserId(email, { silent: false }); },
     setGenieId: function (genieId) { cfg.genieId = genieId; },
+    newChat: function () { startNewChat(); },
   };
 })();
