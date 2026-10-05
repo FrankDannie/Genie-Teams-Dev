@@ -53,7 +53,7 @@ function cleanDataCenter(raw, env) {
 // guess. A 400 (or a response that just looks "empty"/wrong-shaped) most
 // likely means the field names are wrong.
 function historyApiUrl(env) {
-  return env.HISTORY_API_URL || 'https://apim.workato.com/frankd308/headless-v1/genie-chat-history-api';
+  return env.HISTORY_API_URL || 'https://apim.workato.com/frankd308/headless-v1/endpoint_path';
 }
 
 // Cloudflare env vars pasted from a dashboard text box very commonly carry
