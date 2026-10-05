@@ -45,11 +45,13 @@ function cleanDataCenter(raw, env) {
 }
 
 // A Workato API Platform endpoint (built from a recipe), used for both
-// listing and upserting history rows. NOTE — the exact field names this
-// endpoint expects/returns haven't been confirmed against its actual
+// listing and upserting history rows. Auth is an `api-token` header (NOT
+// `Authorization: Bearer`, unlike the Genie/IAM calls above — this
+// endpoint's own convention). NOTE — the exact field names this endpoint
+// expects/returns still haven't been confirmed against its actual
 // contract; these match the Data Table's own column names as a best
-// guess. A 401 here means the auth header is wrong; a 400 (or a response
-// that just looks "empty"/wrong-shaped) means the field names are wrong.
+// guess. A 400 (or a response that just looks "empty"/wrong-shaped) most
+// likely means the field names are wrong.
 function historyApiUrl(env) {
   return env.HISTORY_API_URL || 'https://apim.workato.com/frankd308/headless-v1/endpoint_path';
 }
@@ -160,7 +162,7 @@ async function handleApi(request, env, url) {
 
     const listUrl = `${historyApiUrl(env)}?idp_user_id=${encodeURIComponent(idpUserId)}`;
     const upstream = await fetch(listUrl, {
-      headers: { Authorization: `Bearer ${env.DATATABLE_API_TOKEN}` },
+      headers: { 'api-token': env.DATATABLE_API_TOKEN },
     });
     const text = await upstream.text();
     return new Response(text, {
@@ -196,7 +198,7 @@ async function handleApi(request, env, url) {
     try {
       const upstream = await fetch(historyApiUrl(env), {
         method: 'POST',
-        headers: { Authorization: `Bearer ${env.DATATABLE_API_TOKEN}`, 'Content-Type': 'application/json' },
+        headers: { 'api-token': env.DATATABLE_API_TOKEN, 'Content-Type': 'application/json' },
         body: JSON.stringify(row),
       });
       const text = await upstream.text();
