@@ -120,7 +120,7 @@ Microsoft Entra ID). Add one script tag:
   src="https://YOUR-GENIE-CONNECT-HOST/widget-embed.js"
   data-base-url="https://YOUR-GENIE-CONNECT-HOST"
   data-genie-id="gin-AbMAK4r6-rXgonW-CD"
-  data-interface-name="Lenovo QA Genie"
+  data-interface-name=Smart Genie""
   data-idp-user-id=""
 ></script>
 ```
