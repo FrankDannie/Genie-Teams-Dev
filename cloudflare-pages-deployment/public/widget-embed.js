@@ -7,7 +7,7 @@
  *     src="https://YOUR-GENIE-CONNECT-HOST/widget-embed.js"
  *     data-base-url="https://YOUR-GENIE-CONNECT-HOST"
  *     data-genie-id="gin-AbMAK4r6-rXgonW-CD"
- *     data-interface-name="Lenovo QA Genie"
+ *     data-interface-name="Smart Genie"
  *     data-idp-user-id=""
  *   ></script>
  *
@@ -32,14 +32,13 @@
  *   window.GenieWidget.open();
  *   window.GenieWidget.close();
  *
- * Chat history: each conversation (id + its messages) is saved to this
- * browser's localStorage, keyed by genie ID — there is no server-side
- * history store. That's deliberate: it needs no database, no per-user
- * accounts, and no extra backend work, at the cost of history being
- * per-browser rather than synced across devices. Reopening a past
- * conversation from the sidebar resumes the SAME upstream conversationId,
- * so the Genie still has all the prior context — it's not just a local
- * transcript, you can keep chatting in it.
+ * Chat history: saved through the backend to a Workato Data Table
+ * (GET/POST /api/history), keyed by idpUserId — NOT localStorage anymore.
+ * This means history now follows the person across browsers and devices,
+ * at the cost of needing that one Data Table configured server-side
+ * (DATATABLE_ID / DATATABLE_API_TOKEN). Reopening a past conversation
+ * resumes the SAME upstream conversationId, so the Genie still has all
+ * the prior context — it's not just a local transcript.
  *
  * Note on Microsoft Entra's "My Apps" portal itself: that portal only
  * launches/links to registered app URLs — it has no mechanism to host a
@@ -56,13 +55,7 @@
     dataCenter: (thisScript && thisScript.getAttribute('data-data-center')) || '',
     interfaceName: (thisScript && thisScript.getAttribute('data-interface-name')) || 'Genie Connect',
     idpUserId: (thisScript && thisScript.getAttribute('data-idp-user-id')) || '',
-    // A host page that already knows the signed-in user's email can pass it
-    // directly instead of relying on the ?email= query param below.
     userEmail: (thisScript && thisScript.getAttribute('data-user-email')) || '',
-    // Optional best-effort silent sign-in (e.g. for a SharePoint-embedded page
-    // where the visitor is already signed into Microsoft 365). Only attempted
-    // when both of these are set — otherwise the widget never loads MSAL at
-    // all, keeping the plain drop-in case lightweight.
     ssoClientId: (thisScript && thisScript.getAttribute('data-sso-client-id')) || '',
     ssoTenantId: (thisScript && thisScript.getAttribute('data-sso-tenant-id')) || '',
   };
@@ -70,15 +63,6 @@
   var ROOT_ID = 'genie-widget-root';
   if (document.getElementById(ROOT_ID)) return; // already injected
 
-  // ---------------------------------------------------------------------
-  // Styles — scoped under #genie-widget-root so nothing leaks into, or is
-  // affected by, the host page's own CSS.
-  //
-  // Deliberately plain/neutral palette (grays + one muted blue accent,
-  // system font stack, no Google Fonts import) so this doesn't visually
-  // clash sitting inside SharePoint or a Chrome side panel — both use
-  // similar light, low-saturation, system-font UI by default.
-  // ---------------------------------------------------------------------
   var style = document.createElement('style');
   style.textContent = [
     '#' + ROOT_ID + '{',
@@ -161,9 +145,6 @@
   ].join('\n');
   document.head.appendChild(style);
 
-  // ---------------------------------------------------------------------
-  // Markup
-  // ---------------------------------------------------------------------
   var root = document.createElement('div');
   root.id = ROOT_ID;
   root.innerHTML = [
@@ -205,9 +186,6 @@
   ].join('\n');
   document.body.appendChild(root);
 
-  // ---------------------------------------------------------------------
-  // Behavior
-  // ---------------------------------------------------------------------
   var $ = function (id) { return document.getElementById(id); };
   var launcher = $('gwLauncher'), panel = $('gwPanel'), ping = $('gwPing');
   var sidebar = $('gwSidebar'), sidebarList = $('gwSidebarList');
@@ -226,21 +204,33 @@
     } catch (e) { return ''; }
   }
 
-  // ---------------------------------------------------------------------
-  // Chat history — localStorage only, keyed per genie. See the file-level
-  // comment at the top for why this is client-side rather than a backend
-  // history store.
-  // ---------------------------------------------------------------------
-  var HISTORY_KEY = 'genieWidgetHistory:' + (cfg.genieId || 'default');
   var history = [];
-  try { history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch (e) { history = []; }
 
-  function saveHistory() {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 50))); } catch (e) { /* storage unavailable/full — history just won't persist */ }
+  async function loadHistoryFromServer() {
+    if (!state.idpUserId) return;
+    try {
+      var res = await fetch(api('/api/history?idpUserId=' + encodeURIComponent(state.idpUserId) + '&dataCenter=' + encodeURIComponent(cfg.dataCenter || '')));
+      var data = await res.json().catch(function () { return {}; });
+      var rows = data.data || data.records || [];
+      history = rows.map(function (r) {
+        var fields = r.data || r;
+        var msgs = [];
+        try { msgs = JSON.parse(fields.messages || '[]'); } catch (e) { msgs = []; }
+        return {
+          id: fields.conversation_id,
+          title: fields.title || 'New chat',
+          updatedAt: fields.updated_at || new Date().toISOString(),
+          messages: msgs,
+        };
+      }).sort(function (a, b) { return new Date(b.updatedAt) - new Date(a.updatedAt); });
+    } catch (e) {
+      history = [];
+    }
+    renderHistoryList();
   }
 
-  function upsertHistory() {
-    if (!state.conversationId || state.messages.length === 0) return;
+  async function upsertHistory() {
+    if (!state.conversationId || state.messages.length === 0 || !state.idpUserId) return;
     var idx = -1;
     for (var i = 0; i < history.length; i++) { if (history[i].id === state.conversationId) { idx = i; break; } }
     var entry = {
@@ -251,9 +241,22 @@
     };
     if (idx >= 0) history.splice(idx, 1);
     history.unshift(entry);
-    history = history.slice(0, 50);
-    saveHistory();
     renderHistoryList();
+
+    try {
+      await fetch(api('/api/history'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idpUserId: state.idpUserId,
+          genieId: cfg.genieId,
+          conversationId: state.conversationId,
+          title: entry.title,
+          messages: state.messages,
+          dataCenter: cfg.dataCenter || '',
+        }),
+      });
+    } catch (e) { /* save failed silently — this session still works */ }
   }
 
   function renderHistoryList() {
@@ -311,13 +314,6 @@
   $('gwSidebarNewChatBtn').addEventListener('click', startNewChat);
   renderHistoryList();
 
-  // Pick up server-configured defaults (genie ID / data center) when the
-  // host page didn't set data-genie-id / data-data-center explicitly. This
-  // is awaited below (as defaultsReady) before any auto-identify attempt —
-  // resolveEmailToUserId needs cfg.dataCenter, and firing an auto-identify
-  // attempt before this resolves silently fails the lookup (the "no data
-  // center" warning is suppressed in silent mode), leaving the widget
-  // sitting on the manual email prompt for no visible reason.
   var defaultsReady = (async function loadDefaults() {
     try {
       var res = await fetch(api('/api/health'));
@@ -364,12 +360,6 @@
   }
   renderEmptyState();
 
-  // ---------------------------------------------------------------------
-  // Email -> X-IDP-User-ID, via the same /api/iam/users lookup the console
-  // uses. `silent` suppresses the on-screen error for a background attempt
-  // (e.g. the auto-identify below) so it fails quietly into the prompt
-  // instead of flashing an alert the visitor never asked to see.
-  // ---------------------------------------------------------------------
   async function resolveEmailToUserId(email, opts) {
     opts = opts || {};
     if (!email || !isValidEmail(email)) {
@@ -400,6 +390,7 @@
       }
       state.idpUserId = match.id;
       renderEmptyState();
+      loadHistoryFromServer();
       return true;
     } catch (err) {
       if (!opts.silent) renderEmptyState(err.message);
@@ -407,15 +398,6 @@
     }
   }
 
-  // ---------------------------------------------------------------------
-  // Best-effort silent Microsoft sign-in (only runs when data-sso-client-id
-  // and data-sso-tenant-id are both set — e.g. for the SharePoint full-page
-  // embed). Uses the browser's existing Microsoft 365 session, no popup.
-  // This is genuinely best-effort: browsers that block third-party cookies,
-  // or a host page that further sandboxes this iframe, can make it fail
-  // every time — that's expected, not a bug, and it falls back to the email
-  // prompt above whenever it does.
-  // ---------------------------------------------------------------------
   async function trySilentSSO() {
     if (!cfg.ssoClientId || !cfg.ssoTenantId || state.idpUserId) return;
     try {
@@ -436,21 +418,12 @@
       var result = await msalInstance.ssoSilent({ scopes: ['openid', 'profile', 'email'] });
       var email = result && result.account && (result.account.username || (result.account.idTokenClaims && result.account.idTokenClaims.email));
       if (email) await resolveEmailToUserId(email, { silent: true });
-    } catch (err) {
-      // Expected to fail often (no existing session, blocked third-party
-      // cookies, nested-iframe sandboxing). The email prompt is already
-      // showing — nothing more to do.
-    }
+    } catch (err) { /* expected to fail often — email prompt already showing */ }
   }
 
-  // An ?email= query param (e.g. set by the Chrome extension's side panel
-  // using chrome.identity, or an SPFx web part using pageContext.user.email)
-  // or a data-user-email attribute is the most reliable signal of all, since
-  // it needs no cookies or SSO session. Only fall back to best-effort silent
-  // SSO when neither is present. Both wait for defaultsReady first, since
-  // resolveEmailToUserId needs cfg.dataCenter.
   (async function identify() {
     await defaultsReady;
+    if (state.idpUserId) { loadHistoryFromServer(); return; }
     var knownEmail = cfg.userEmail || getQueryEmail();
     if (knownEmail) {
       await resolveEmailToUserId(knownEmail, { silent: true, sourceLabel: knownEmail });
@@ -459,10 +432,6 @@
     }
   })();
 
-  // paintMessage does DOM only, no state — used both for live messages
-  // (via renderMessage below, which also records to state.messages for
-  // history) and for replaying a past conversation loaded from the
-  // sidebar (where state.messages is already set from storage).
   function paintMessage(role, text) {
     var empty = $('gwEmpty');
     if (empty) empty.remove();
@@ -540,7 +509,7 @@
       buffer = lines.pop();
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
-        if (!line || !line.startsWith('data:')) continue; // only "data:" lines carry content
+        if (!line || !line.startsWith('data:')) continue;
         var payload = line.slice(5).trim();
         if (!payload || payload === '[DONE]') continue;
         var piece = '';
@@ -606,13 +575,10 @@
     }
   }
 
-  // ---------------------------------------------------------------------
-  // Public API for the host page
-  // ---------------------------------------------------------------------
   window.GenieWidget = {
     open: function () { setOpen(true); },
     close: function () { setOpen(false); },
-    setUser: function (idpUserId) { state.idpUserId = idpUserId || ''; if (!body.querySelector('.gw-msg')) renderEmptyState(); },
+    setUser: function (idpUserId) { state.idpUserId = idpUserId || ''; if (!body.querySelector('.gw-msg')) renderEmptyState(); if (idpUserId) loadHistoryFromServer(); },
     setEmail: function (email) { return resolveEmailToUserId(email, { silent: false }); },
     setGenieId: function (genieId) { cfg.genieId = genieId; },
     newChat: function () { startNewChat(); },

@@ -8,19 +8,22 @@
  * connect this repo in the Cloudflare dashboard once, and every git push
  * rebuilds and redeploys this automatically.
  *
- * GENIE_API_KEY and IAM_API_TOKEN are never in this file — they're set
- * as encrypted environment variables in the Pages dashboard (Settings →
- * Environment variables → "Encrypt"), or via `wrangler pages secret put`
- * if you prefer the CLI. Either way, nothing secret is ever in git.
+ * GENIE_API_KEY, IAM_API_TOKENare never in this
+ * file — they're set as encrypted environment variables in the Pages
+ * dashboard (Settings → Environment variables → "Encrypt"), or via
+ * `wrangler pages secret put` if you prefer the CLI. Either way, nothing
+ * secret is ever in git.
  *
  * Because the site and this API are the exact same Pages project, every
- * fetch('/api/...') call from index.html is same-origin — no CORS setup
- * needed, unlike the split GitHub-Pages-site + separate-Worker approach.
+ * fetch('/api/...') call from index.html/widget.html/widget-embed.js is
+ * same-origin — no CORS setup needed.
  *
- * Routes (identical to server.js / worker.js):
+ * Routes:
  *   POST /api/genie/conversations
  *   POST /api/genie/conversations/:conversationId/messages   (streamed)
  *   GET  /api/iam/users?email=...&dataCenter=...
+ *   GET  /api/history?idpUserId=...&dataCenter=...                     [chat history: list]
+ *   POST /api/history                                                  [chat history: upsert]
  *   GET  /api/health
  *   anything else → served as a normal static file from this folder
  * -----------------------------------------------------------------------
@@ -35,6 +38,22 @@ function json(data, status) {
 
 function genieBase(genieId) {
   return `https://genie-api.workato.com/api/v1/genies/${genieId}/chat`;
+}
+
+function cleanDataCenter(raw, env) {
+  return (raw || env.DATA_CENTER || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+// NOTE — this one function is the part most likely to need adjusting.
+// It's written to the Workato Data Tables REST API shape as I understand
+// it (Bearer token, { data: {...} } envelope, simple query-string
+// filtering on a column name). Once the table exists, open its "API" tab
+// in the Workato UI — it shows the exact request shape for THIS table —
+// and compare against this function; fix anything that differs.
+function dtRecordsUrl(env, dataCenter, suffix) {
+  const dc = cleanDataCenter(dataCenter, env);
+  const tableId = env.DATATABLE_ID; // the "Genie Chat History" table — override with a DATATABLE_ID env var if you ever point this at a different table
+  return `https://${dc}/api/data_tables/${tableId}/records${suffix || ''}`;
 }
 
 async function handleApi(request, env, url) {
@@ -98,7 +117,6 @@ async function handleApi(request, env, url) {
       return new Response(errText, { status: upstream.status });
     }
 
-    // Pass the upstream stream straight through to the browser.
     return new Response(upstream.body, {
       status: 200,
       headers: {
@@ -114,9 +132,7 @@ async function handleApi(request, env, url) {
   // ---------------------------------------------------------------
   if (pathname === '/api/iam/users' && request.method === 'GET') {
     const email = url.searchParams.get('email');
-    const dataCenter = (url.searchParams.get('dataCenter') || env.DATA_CENTER || '')
-      .replace(/^https?:\/\//, '')
-      .replace(/\/$/, '');
+    const dataCenter = cleanDataCenter(url.searchParams.get('dataCenter'), env);
 
     if (!email) return json({ error: 'Missing email query param' }, 400);
     if (!dataCenter) return json({ error: 'Missing dataCenter' }, 400);
@@ -135,6 +151,76 @@ async function handleApi(request, env, url) {
   }
 
   // ---------------------------------------------------------------
+  // GET /api/history?idpUserId=...&dataCenter=...
+  // List this user's saved conversations, newest first.
+  // ---------------------------------------------------------------
+  if (pathname === '/api/history' && request.method === 'GET') {
+    const idpUserId = url.searchParams.get('idpUserId');
+    const dataCenter = url.searchParams.get('dataCenter');
+
+    if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
+    if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
+
+    const listUrl = dtRecordsUrl(env, dataCenter, `?idp_user_id=${encodeURIComponent(idpUserId)}`);
+    const upstream = await fetch(listUrl, {
+      headers: { Authorization: `Bearer ${env.IAM_API_TOKEN}` },
+    });
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: { 'Content-Type': upstream.headers.get('content-type') || 'application/json' },
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // POST /api/history
+  // Upsert one conversation's history row. Looks up by conversation_id
+  // first so re-saving the same conversation updates it instead of
+  // creating duplicate rows.
+  // ---------------------------------------------------------------
+  if (pathname === '/api/history' && request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { idpUserId, genieId, conversationId, title, messages, dataCenter } = body;
+
+    if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
+    if (!conversationId) return json({ error: 'Missing conversationId' }, 400);
+    if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
+
+    const headers = { Authorization: `Bearer ${env.IAM_API_TOKEN}`, 'Content-Type': 'application/json' };
+    const row = {
+      idp_user_id: idpUserId,
+      genie_id: genieId || '',
+      conversation_id: conversationId,
+      title: title || '',
+      updated_at: new Date().toISOString(),
+      messages: JSON.stringify(messages || []),
+    };
+
+    try {
+      const findUrl = dtRecordsUrl(env, dataCenter, `?conversation_id=${encodeURIComponent(conversationId)}`);
+      const findRes = await fetch(findUrl, { headers });
+      const findData = await findRes.json().catch(() => ({}));
+      const existing = (findData.data || findData.records || [])[0];
+
+      const upstream = existing
+        ? await fetch(dtRecordsUrl(env, dataCenter, `/${existing.id}`), {
+            method: 'PUT', headers, body: JSON.stringify({ data: row }),
+          })
+        : await fetch(dtRecordsUrl(env, dataCenter), {
+            method: 'POST', headers, body: JSON.stringify({ data: row }),
+          });
+
+      const text = await upstream.text();
+      return new Response(text, {
+        status: upstream.status,
+        headers: { 'Content-Type': upstream.headers.get('content-type') || 'application/json' },
+      });
+    } catch (err) {
+      return json({ error: 'Data table request failed', detail: err.message }, 502);
+    }
+  }
+
+  // ---------------------------------------------------------------
   // GET /api/health
   // ---------------------------------------------------------------
   if (pathname === '/api/health' && request.method === 'GET') {
@@ -142,6 +228,7 @@ async function handleApi(request, env, url) {
       ok: true,
       genieApiKeyConfigured: Boolean(env.GENIE_API_KEY),
       iamTokenConfigured: Boolean(env.IAM_API_TOKEN),
+      dataTableConfigured: Boolean(env.IAM_API_TOKEN), 
       defaultGenieId: env.GENIE_ID || null,
       defaultDataCenter: env.DATA_CENTER || null,
     });
@@ -158,6 +245,9 @@ export default {
         return await handleApi(request, env, url);
       }
       // Everything else (index.html, etc.) — serve as a normal static file.
+      // Cloudflare Pages already handles clean URLs itself (/widget serves
+      // widget.html, and redirects /widget.html -> /widget) — do not add
+      // another redirect here, it'll loop against that one.
       return env.ASSETS.fetch(request);
     } catch (err) {
       return json({ error: 'Upstream request failed', detail: err.message }, 502);
