@@ -8,7 +8,7 @@
  * connect this repo in the Cloudflare dashboard once, and every git push
  * rebuilds and redeploys this automatically.
  *
- * GENIE_API_KEY and IAM_API_TOKEN are never in this
+ * GENIE_API_KEY, IAM_API_TOKEN, and DATATABLE_API_TOKEN are never in this
  * file — they're set as encrypted environment variables in the Pages
  * dashboard (Settings → Environment variables → "Encrypt"), or via
  * `wrangler pages secret put` if you prefer the CLI. Either way, nothing
@@ -156,11 +156,11 @@ async function handleApi(request, env, url) {
     const idpUserId = url.searchParams.get('idpUserId');
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
-    if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
+    if (!env.DATATABLE_API_TOKEN) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
 
     const listUrl = `${historyApiUrl(env)}?idp_user_id=${encodeURIComponent(idpUserId)}`;
     const upstream = await fetch(listUrl, {
-      headers: { Authorization: `Bearer ${env.IAM_API_TOKEN}` },
+      headers: { Authorization: `Bearer ${env.DATATABLE_API_TOKEN}` },
     });
     const text = await upstream.text();
     return new Response(text, {
@@ -182,7 +182,7 @@ async function handleApi(request, env, url) {
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
     if (!conversationId) return json({ error: 'Missing conversationId' }, 400);
-    if (!env.IAM_API_TOKEN) return json({ error: 'Missing IAM_API_TOKEN env var' }, 500);
+    if (!env.DATATABLE_API_TOKEN) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
 
     const row = {
       idp_user_id: idpUserId,
@@ -196,7 +196,7 @@ async function handleApi(request, env, url) {
     try {
       const upstream = await fetch(historyApiUrl(env), {
         method: 'POST',
-        headers: { Authorization: `Bearer ${env.IAM_API_TOKEN}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${env.DATATABLE_API_TOKEN}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(row),
       });
       const text = await upstream.text();
@@ -217,7 +217,7 @@ async function handleApi(request, env, url) {
       ok: true,
       genieApiKeyConfigured: Boolean(env.GENIE_API_KEY),
       iamTokenConfigured: Boolean(env.IAM_API_TOKEN),
-      dataTableConfigured: Boolean(env.IAM_API_TOKEN), // DATATABLE_ID defaults to 155843 if unset
+      dataTableConfigured: Boolean(env.DATATABLE_API_TOKEN), // DATATABLE_ID defaults to 155843 if unset
       defaultGenieId: env.GENIE_ID || null,
       defaultDataCenter: env.DATA_CENTER || null,
     });
