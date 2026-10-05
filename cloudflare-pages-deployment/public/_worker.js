@@ -56,6 +56,26 @@ function historyApiUrl(env) {
   return env.HISTORY_API_URL || 'https://apim.workato.com/frankd308/headless-v1/endpoint_path';
 }
 
+// Cloudflare env vars pasted from a dashboard text box very commonly carry
+// an invisible trailing newline or leading/trailing space from the copy —
+// which breaks header auth while LOOKING identical to the correct value
+// everywhere you'd visually check it. Trim defensively; it's a no-op if
+// the value was already clean.
+function historyApiToken(env) {
+  return (env.DATATABLE_API_TOKEN || '').trim();
+}
+
+// Masked preview for /api/health — never return the real token. Lets you
+// confirm server-side what's actually configured (length + first/last 2
+// chars) without exposing the secret, so you can tell "empty", "has stray
+// whitespace" (length looks off), and "wrong value" (the preview text
+// won't match what you expect) apart from each other.
+function maskedTokenPreview(value) {
+  if (!value) return null;
+  if (value.length <= 6) return `${value.length} chars (too short to preview safely)`;
+  return `${value.length} chars, "${value.slice(0, 2)}...${value.slice(-2)}"`;
+}
+
 async function handleApi(request, env, url) {
   const { pathname } = url;
 
@@ -158,11 +178,12 @@ async function handleApi(request, env, url) {
     const idpUserId = url.searchParams.get('idpUserId');
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
-    if (!env.DATATABLE_API_TOKEN) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
+    const dtToken = historyApiToken(env);
+    if (!dtToken) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
 
     const listUrl = `${historyApiUrl(env)}?idp_user_id=${encodeURIComponent(idpUserId)}`;
     const upstream = await fetch(listUrl, {
-      headers: { 'api-token': env.DATATABLE_API_TOKEN },
+      headers: { 'api-token': dtToken },
     });
     const text = await upstream.text();
     return new Response(text, {
@@ -184,7 +205,8 @@ async function handleApi(request, env, url) {
 
     if (!idpUserId) return json({ error: 'Missing idpUserId' }, 400);
     if (!conversationId) return json({ error: 'Missing conversationId' }, 400);
-    if (!env.DATATABLE_API_TOKEN) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
+    const dtTokenPost = historyApiToken(env);
+    if (!dtTokenPost) return json({ error: 'Missing DATATABLE_API_TOKEN env var' }, 500);
 
     const row = {
       idp_user_id: idpUserId,
@@ -198,7 +220,7 @@ async function handleApi(request, env, url) {
     try {
       const upstream = await fetch(historyApiUrl(env), {
         method: 'POST',
-        headers: { 'api-token': env.DATATABLE_API_TOKEN, 'Content-Type': 'application/json' },
+        headers: { 'api-token': dtTokenPost, 'Content-Type': 'application/json' },
         body: JSON.stringify(row),
       });
       const text = await upstream.text();
@@ -219,7 +241,9 @@ async function handleApi(request, env, url) {
       ok: true,
       genieApiKeyConfigured: Boolean(env.GENIE_API_KEY),
       iamTokenConfigured: Boolean(env.IAM_API_TOKEN),
-      dataTableConfigured: Boolean(env.DATATABLE_API_TOKEN), // DATATABLE_ID defaults to 155843 if unset
+      dataTableConfigured: Boolean(historyApiToken(env)),
+      dataTableTokenPreview: maskedTokenPreview(historyApiToken(env)), // confirms what the server actually sees — never the real value
+      historyApiUrl: historyApiUrl(env), // confirms which URL is actually being called (vs. the HISTORY_API_URL override)
       defaultGenieId: env.GENIE_ID || null,
       defaultDataCenter: env.DATA_CENTER || null,
     });
