@@ -47,6 +47,9 @@
     dataCenter: (thisScript && thisScript.getAttribute('data-data-center')) || '',
     interfaceName: (thisScript && thisScript.getAttribute('data-interface-name')) || 'Genie Connect',
     idpUserId: (thisScript && thisScript.getAttribute('data-idp-user-id')) || '',
+    // A host page that already knows the signed-in user's email can pass it
+    // directly instead of relying on the ?email= query param below.
+    userEmail: (thisScript && thisScript.getAttribute('data-user-email')) || '',
     // Optional best-effort silent sign-in (e.g. for a SharePoint-embedded page
     // where the visitor is already signed into Microsoft 365). Only attempted
     // when both of these are set — otherwise the widget never loads MSAL at
@@ -176,10 +179,20 @@
 
   function api(path) { return (cfg.baseUrl || '') + path; }
   function isValidEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+  function getQueryEmail() {
+    try {
+      return new URLSearchParams(window.location.search).get('email') || '';
+    } catch (e) { return ''; }
+  }
 
   // Pick up server-configured defaults (genie ID / data center) when the
-  // host page didn't set data-genie-id / data-data-center explicitly.
-  (async function loadDefaults() {
+  // host page didn't set data-genie-id / data-data-center explicitly. This
+  // is awaited below (as defaultsReady) before any auto-identify attempt —
+  // resolveEmailToUserId needs cfg.dataCenter, and firing an auto-identify
+  // attempt before this resolves silently fails the lookup (the "no data
+  // center" warning is suppressed in silent mode), leaving the widget
+  // sitting on the manual email prompt for no visible reason.
+  var defaultsReady = (async function loadDefaults() {
     try {
       var res = await fetch(api('/api/health'));
       var data = await res.json();
@@ -228,7 +241,7 @@
   // ---------------------------------------------------------------------
   // Email -> X-IDP-User-ID, via the same /api/iam/users lookup the console
   // uses. `silent` suppresses the on-screen error for a background attempt
-  // (e.g. the SSO auto-identify below) so it fails quietly into the prompt
+  // (e.g. the auto-identify below) so it fails quietly into the prompt
   // instead of flashing an alert the visitor never asked to see.
   // ---------------------------------------------------------------------
   async function resolveEmailToUserId(email, opts) {
@@ -303,7 +316,23 @@
       // showing — nothing more to do.
     }
   }
-  trySilentSSO();
+
+  // An ?email= query param (e.g. set by the Chrome extension's side panel
+  // using chrome.identity, or an SPFx web part using pageContext.user.email)
+  // or a data-user-email attribute is the most reliable signal of all, since
+  // it needs no cookies or SSO session. Only fall back to best-effort silent
+  // SSO when neither is present. Both wait for defaultsReady first, since
+  // resolveEmailToUserId needs cfg.dataCenter — this ordering is the actual
+  // fix for the "auto-identify sometimes silently does nothing" symptom.
+  (async function identify() {
+    await defaultsReady;
+    var knownEmail = cfg.userEmail || getQueryEmail();
+    if (knownEmail) {
+      await resolveEmailToUserId(knownEmail, { silent: true, sourceLabel: knownEmail });
+    } else {
+      await trySilentSSO();
+    }
+  })();
 
   function renderMessage(role, text) {
     var empty = $('gwEmpty');
