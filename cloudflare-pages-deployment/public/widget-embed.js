@@ -40,6 +40,11 @@
  * OAUTH_CLIENT_ID on the server and oauth-callback.html registered as the
  * client's redirect URL. History then comes from the Headless API itself.
  *
+ * Console layout — add layout=console (widget.html URL) or data-layout="console"
+ * for the full-page look: dark top bar, single-agent sidebar, hero with
+ * capability chips, quick-action chips, rounded composer with attachments
+ * (OAuth mode). Wording lives in CONSOLE_COPY near the top of this file.
+ *
  * Chat history: saved through the backend to a Workato Data Table
  * (GET/POST /api/history), keyed by idpUserId — NOT localStorage anymore.
  * This means history now follows the person across browsers and devices,
@@ -67,6 +72,7 @@
     ssoClientId: (thisScript && thisScript.getAttribute('data-sso-client-id')) || '',
     ssoTenantId: (thisScript && thisScript.getAttribute('data-sso-tenant-id')) || '',
     authMode: (thisScript && thisScript.getAttribute('data-auth-mode')) || '',
+    layout: (thisScript && thisScript.getAttribute('data-layout')) || '',
     oauth: null, // filled from /api/health when authMode is "oauth"
   };
   // widget.html (and only pages that opt in) may be configured from the URL.
@@ -75,13 +81,215 @@
       var qp = new URLSearchParams(window.location.search);
       if (/^gin-[\w-]+$/.test(qp.get('genie') || '')) cfg.genieId = qp.get('genie');
       if (qp.get('auth') === 'oauth') cfg.authMode = 'oauth';
+      if (qp.get('layout') === 'console') cfg.layout = 'console';
       if (qp.get('name')) cfg.interfaceName = qp.get('name').slice(0, 60);
     } catch (e) { /* ignore */ }
   }
   var isOAuth = cfg.authMode === 'oauth';
+  var isConsole = cfg.layout === 'console';
 
   var ROOT_ID = 'genie-widget-root';
   if (document.getElementById(ROOT_ID)) return; // already injected
+
+  // =====================================================================
+  // "Console" layout — ?layout=console (widget.html) or data-layout="console".
+  // A full-page look: dark top bar, one-agent sidebar, agent header, hero
+  // with capability chips, quick-action chips and a rounded composer.
+  // It re-uses every element id the chat logic below already expects, so
+  // sign-in, streaming, history and approvals work exactly as before.
+  // Edit CONSOLE_COPY to change the wording; nothing else needs touching.
+  // =====================================================================
+  var CONSOLE_COPY = {
+    brand: 'Agentic Solutions',
+    tagline: 'DEMO CONSOLE - WOW 2026',
+    logoUrl: '/assets/wow-logo.png',            // optional: drop the real logo here; text logo shows if the file is missing
+    agentName: cfg.interfaceName,
+    agentTag: 'IT',
+    agentSub: 'Idea Lifestyle Furniture \u00b7 IT suite',
+    description: 'Self-service IT helpdesk agent for access, credentials, group management, and ticket resolution \u2014 with human escalation when needed.',
+    company: 'IDEA LIFESTYLE FURNITURE',
+    capabilities: ['Access Requests', 'Approvals', 'Password Reset', 'Account Unlock', 'Group Management', 'Ticket Resolution'],
+    quick: ['Request application access', 'Reset my password', 'Unlock my account', 'What do I have access to?'],
+    placeholder: 'Ask IT Support Agent anything\u2026',
+    disclaimer: 'Demo environment \u2014 please don\u2019t enter personal or confidential information.',
+    hint: 'Enter to send \u00b7 Shift+Enter for a new line \u00b7 attachments up to 20 MB',
+  };
+  var ICON = {
+    headset: '<path d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M21 16v2a4 4 0 0 1-4 4h-5"/>',
+    bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+    gear: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    reset: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+    clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+    send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+    bolt: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+    shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  };
+  function svgIcon(name, size) {
+    return '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICON[name] + '</svg>';
+  }
+
+  function consoleHtml() {
+    var C = CONSOLE_COPY;
+    var name = escapeHtml(C.agentName);
+    var quick = C.quick.map(function (q) {
+      return '<button type="button" class="gc-quick-btn" data-q="' + escapeHtml(q) + '">' + svgIcon('bolt', 11) + '<span>' + escapeHtml(q) + '</span></button>';
+    }).join('');
+    return [
+      '<button class="gw-launcher" id="gwLauncher" type="button" aria-hidden="true" tabindex="-1"><span class="gw-ping" id="gwPing"></span></button>',
+      '<header class="gc-top">',
+      '  <div class="gc-brand">',
+      '    <div class="gc-logo"><img class="gc-logo-img" src="' + escapeHtml(C.logoUrl) + '" alt="World of Workato">',
+      '      <div class="gc-logo-fallback" style="display:none"><span class="gc-logo-wow">WOW</span><span class="gc-logo-sub">World of<br>Workato</span></div></div>',
+      '    <div class="gc-brand-text"><div class="gc-brand-name">' + escapeHtml(C.brand) + '</div><div class="gc-brand-tag">' + escapeHtml(C.tagline) + '</div></div>',
+      '  </div>',
+      '  <div class="gc-top-right">',
+      '    <button type="button" class="gc-ghost" aria-label="Notifications" title="Notifications">' + svgIcon('bell', 16) + '</button>',
+      '    <button type="button" class="gc-settings">' + svgIcon('gear', 14) + '<span>Settings</span></button>',
+      '    <span class="gc-sep"></span>',
+      '    <div class="gc-user"><div class="gc-user-name" id="gwUserName"></div><div class="gc-user-email" id="gwUserEmail"></div></div>',
+      '    <button type="button" class="gc-ghost" id="gwSignOut" aria-label="Sign out" title="Sign out" style="display:none">' + svgIcon('logout', 16) + '</button>',
+      '  </div>',
+      '</header>',
+      '<div class="gc-body">',
+      '  <aside class="gc-side">',
+      '    <div class="gc-side-label">AGENTS</div>',
+      '    <div class="gc-agent active"><span class="gc-tile gc-tile-sm">' + svgIcon('headset', 14) + '</span>',
+      '      <span class="gc-agent-text"><span class="gc-agent-name">' + name + '</span><span class="gc-agent-tag">' + escapeHtml(C.agentTag) + '</span></span></div>',
+      '  </aside>',
+      '  <section class="gc-main open" id="gwPanel">',
+      '    <div class="gc-agent-head">',
+      '      <div class="gc-agent-id"><span class="gc-tile">' + svgIcon('headset', 17) + '</span>',
+      '        <div><h4 id="gwTitle"></h4><div class="gc-agent-sub">' + escapeHtml(C.agentSub) + '</div></div></div>',
+      '      <div class="gc-agent-actions">',
+      '        <span class="gc-pill" id="gwPill" data-state="idle"><i class="gc-dot"></i><span id="gwStreamState">Ready</span></span>',
+      '        <button type="button" class="gc-btn" id="gwHistoryBtn" title="Chat history">' + svgIcon('clock', 14) + '<span>History</span></button>',
+      '        <button type="button" class="gc-btn" id="gwNewChatBtn" title="Start a new conversation">' + svgIcon('reset', 14) + '<span>Reset demo</span></button>',
+      '        <button type="button" id="gwCloseBtn" hidden aria-hidden="true"></button>',
+      '      </div>',
+      '    </div>',
+      '    <div class="gw-main gc-content">',
+      '      <div class="gw-sidebar" id="gwSidebar">',
+      '        <div class="gw-sidebar-head"><span>History</span>',
+      '          <button class="gw-new-chat" id="gwSidebarNewChatBtn" type="button">' + svgIcon('plus', 12) + 'New</button></div>',
+      '        <div class="gw-sidebar-list" id="gwSidebarList"></div>',
+      '      </div>',
+      '      <div class="gw-body" id="gwBody"></div>',
+      '    </div>',
+      '    <div class="gc-footer"><div class="gc-footer-inner">',
+      '      <div id="gwAlertSlot"></div>',
+      '      <div class="gc-quick">' + quick + '</div>',
+      '      <div class="gc-attach" id="gwAttachChip"></div>',
+      '      <form class="gc-composer" id="gwComposerForm">',
+      '        <button type="button" class="gc-attach-btn" id="gwAttachBtn" aria-label="Attach a file" title="Attach a file">' + svgIcon('clip', 16) + '</button>',
+      '        <input type="file" id="gwFile" hidden>',
+      '        <textarea id="gwInput" rows="1" placeholder="' + escapeHtml(C.placeholder) + '" aria-label="Message"></textarea>',
+      '        <button class="gc-send" id="gwSendBtn" type="submit" aria-label="Send message">' + svgIcon('send', 15) + '</button>',
+      '      </form>',
+      '      <div class="gc-disclaimer">' + svgIcon('shield', 12) + '<span>' + escapeHtml(C.disclaimer) + '</span></div>',
+      '      <div class="gc-hint">' + escapeHtml(C.hint) + '</div>',
+      '    </div></div>',
+      '  </section>',
+      '</div>',
+    ].join('\n');
+  }
+
+  function consoleCss() {
+    var R = '#' + ROOT_ID;
+    return [
+      R + '.gc-root{--gw-primary:#2D6A62; --gw-primary-mid:#245750; --gw-primary-soft:#E3EEEB; --gw-card:#FFFFFF; --gw-surface-2:#F4F5F4; --gw-border:#DDE3E1; --gw-border-light:#E7ECEA; --gw-text:#15282C; --gw-text-secondary:#33474B; --gw-text-muted:#8A9794; --gw-success:#1F8F5F; --gw-danger:#C0392B; position:fixed; inset:0; display:flex; flex-direction:column; background:#F4F5F4; font-family:"Instrument Sans",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased;}',
+      R + ' .gw-launcher{display:none !important;}',
+      R + ' button{font-family:inherit;}',
+      // top bar
+      R + ' .gc-top{height:47px; flex-shrink:0; background:#203438; color:#fff; display:flex; align-items:center; justify-content:space-between; padding:0 17px; gap:12px;}',
+      R + ' .gc-brand{display:flex; align-items:center; gap:14px; min-width:0;}',
+      R + ' .gc-logo{display:flex; align-items:center; flex-shrink:0;}',
+      R + ' .gc-logo-img{height:25px; width:auto; display:block;}',
+      R + ' .gc-logo-fallback{align-items:flex-end; gap:3px;}',
+      R + ' .gc-logo-wow{font-weight:900; font-size:25px; line-height:.9; letter-spacing:-.03em; background:linear-gradient(90deg,#7B5CE5,#C27FE6); -webkit-background-clip:text; background-clip:text; color:transparent;}',
+      R + ' .gc-logo-sub{font-size:5.5px; line-height:1.2; letter-spacing:.09em; color:#B9A9E8; text-transform:uppercase;}',
+      R + ' .gc-brand-text{display:flex; flex-direction:column; gap:3px; min-width:0;}',
+      R + ' .gc-brand-name{font-size:12.5px; font-weight:600; line-height:1.1; white-space:nowrap;}',
+      R + ' .gc-brand-tag{font-size:8.5px; letter-spacing:.2em; color:#9DB0B3; line-height:1; white-space:nowrap;}',
+      R + ' .gc-top-right{display:flex; align-items:center; gap:10px; flex-shrink:0;}',
+      R + ' .gc-ghost{width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center; background:transparent; border:none; border-radius:7px; color:#C5D2D4; cursor:pointer;}',
+      R + ' .gc-ghost:hover{background:rgba(255,255,255,.08); color:#fff;}',
+      R + ' .gc-settings{height:32px; padding:0 12px; display:inline-flex; align-items:center; gap:6px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.22); border-radius:9px; color:#fff; font-size:11.5px; font-weight:600; cursor:pointer;}',
+      R + ' .gc-sep{width:1px; height:32px; background:rgba(255,255,255,.14); margin:0 4px;}',
+      R + ' .gc-user{text-align:right; line-height:1.25; max-width:220px;}',
+      R + ' .gc-user-name{font-size:11.5px; font-weight:600; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+      R + ' .gc-user-email{font-size:9.5px; color:#A9BBBE; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+      // body + sidebar
+      R + ' .gc-body{flex:1; display:flex; min-height:0;}',
+      R + ' .gc-side{width:182px; flex-shrink:0; background:#F2F4F3; border-right:1px solid #E1E6E4; padding:20px 9px; overflow-y:auto;}',
+      R + ' .gc-side-label{font-size:8.5px; font-weight:700; letter-spacing:.2em; color:#8A9792; padding:0 10px; margin-bottom:9px;}',
+      R + ' .gc-agent{display:flex; align-items:center; gap:10px; padding:0 10px; height:45px; border-radius:10px; color:#15282C;}',
+      R + ' .gc-agent.active{background:#E3EEEB;}',
+      R + ' .gc-agent-text{display:flex; flex-direction:column; gap:1px; min-width:0;}',
+      R + ' .gc-agent-name{font-size:11.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+      R + ' .gc-agent-tag{font-size:9.5px; color:#8A9792;}',
+      R + ' .gc-tile{width:32px; height:32px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; border-radius:8px; background:#EAF1EF; border:1px solid #D5E1DE; color:#2D6A62;}',
+      R + ' .gc-tile-sm{width:26px; height:26px; border-radius:7px; background:#D3E4E0; border-color:#C2D8D3;}',
+      // main column
+      R + ' .gc-main{flex:1; min-width:0; display:flex; flex-direction:column; background:#F4F5F4;}',
+      R + ' .gc-agent-head{height:58px; flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 20px; border-bottom:1px solid #E1E6E4; background:#F7F8F7;}',
+      R + ' .gc-agent-id{display:flex; align-items:center; gap:11px; min-width:0;}',
+      R + ' .gc-agent-id h4{margin:0; font-size:13px; font-weight:700; color:#15282C; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+      R + ' .gc-agent-sub{font-size:10.5px; color:#7F8D8A; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}',
+      R + ' .gc-agent-actions{display:flex; align-items:center; gap:10px; flex-shrink:0;}',
+      R + ' .gc-pill{height:21px; display:inline-flex; align-items:center; gap:6px; padding:0 10px; border-radius:999px; font-size:10.5px; font-weight:600; background:#E6F6EE; border:1px solid #BFE4D1; color:#1F8F5F;}',
+      R + ' .gc-dot{width:5px; height:5px; border-radius:50%; background:currentColor; display:inline-block;}',
+      R + ' .gc-pill[data-state="idle"]{background:#EEF0EF; border-color:#DDE3E1; color:#7F8D8A;}',
+      R + ' .gc-pill[data-state="busy"]{background:#FFF6E5; border-color:#F1DDB0; color:#A5690C;}',
+      R + ' .gc-pill[data-state="error"]{background:#FBEDED; border-color:#EBC4C4; color:#C0392B;}',
+      R + ' .gc-btn{height:32px; display:inline-flex; align-items:center; gap:7px; padding:0 13px; background:#fff; border:1px solid #DDE3E1; border-radius:9px; color:#15282C; font-size:11.5px; font-weight:600; cursor:pointer;}',
+      R + ' .gc-btn:hover{background:#F4F7F6;}',
+      R + ' .gc-btn.active{background:#E3EEEB; border-color:#C2D8D3;}',
+      R + ' .gc-content{flex:1; min-height:0;}',
+      R + ' .gw-body{background:transparent; padding:20px max(20px, calc((100% - 700px) / 2));}',
+      R + ' .gw-sidebar{background:#F7F8F7; z-index:5;}',
+      R + ' .gw-msg{max-width:92%;}',
+      R + ' .gw-msg.user .gw-msg-bubble{background:#E3EEEB; border-color:#CFDDD9; color:#15282C;}',
+      R + ' .gw-msg.assistant .gw-msg-bubble{background:#fff; border-color:#E3E8E6;}',
+      R + ' .gw-msg-bubble{font-size:12.5px;}',
+      // hero
+      R + ' .gc-hero{max-width:560px; align-items:center; gap:0; color:#7F8D8A;}',
+      R + ' .gc-hero-icon{width:52px; height:52px; border-radius:12px; background:#E7EEEC; border:1px solid #D5E1DE; display:flex; align-items:center; justify-content:center; color:#2D6A62; margin-bottom:20px;}',
+      R + ' .gc-hero-title{margin:0; font-size:18px; font-weight:700; color:#15282C; letter-spacing:-.01em;}',
+      R + ' .gc-hero-desc{margin:11px 0 0; font-size:11.5px; line-height:1.65; color:#7B8986; max-width:420px;}',
+      R + ' .gc-hero-company{margin-top:16px; font-size:9px; letter-spacing:.22em; color:#9AA5A2; font-weight:600;}',
+      R + ' .gc-chips{display:flex; flex-wrap:wrap; justify-content:center; gap:7px; margin-top:16px; max-width:380px;}',
+      R + ' .gc-chip{height:23px; display:inline-flex; align-items:center; padding:0 11px; border-radius:999px; background:#E4EEEB; border:1px solid #CFDDD9; color:#2D6A62; font-size:10.5px; font-weight:500;}',
+      // footer
+      R + ' .gc-footer{flex-shrink:0; padding:12px 0 12px; background:linear-gradient(180deg,rgba(244,245,244,0),#fff 55%); border-top:1px solid #E7ECEA; display:flex; justify-content:center;}',
+      R + ' .gc-footer-inner{width:min(583px, calc(100% - 40px));}',
+      R + ' .gc-quick{display:flex; flex-wrap:wrap; justify-content:center; gap:7px; margin-bottom:9px;}',
+      R + ' .gc-quick-btn{height:21px; display:inline-flex; align-items:center; gap:6px; padding:0 11px; background:#fff; border:1px solid #DDE3E1; border-radius:999px; color:#33474B; font-size:10.5px; font-weight:500; cursor:pointer;}',
+      R + ' .gc-quick-btn:hover{background:#F4F7F6; border-color:#C9D6D2;}',
+      R + ' .gc-quick-btn svg{color:#6B7B78;}',
+      R + ' .gc-composer{display:flex; align-items:center; gap:8px; min-height:49px; padding:8px 8px 8px 12px; background:#fff; border:1px solid #DDE3E1; border-radius:14px; box-shadow:0 1px 2px rgba(20,40,44,.04);}',
+      R + ' .gc-composer:focus-within{border-color:#2D6A62; box-shadow:0 0 0 3px rgba(45,106,98,.12);}',
+      R + ' .gc-composer textarea{flex:1; min-width:0; border:none; background:transparent; resize:none; outline:none; font-family:inherit; font-size:12px; line-height:1.5; color:#15282C; max-height:110px; padding:4px 2px;}',
+      R + ' .gc-composer textarea::placeholder{color:#9AA5A2;}',
+      R + ' .gc-attach-btn{width:28px; height:28px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; background:transparent; border:none; border-radius:7px; color:#8A9794; cursor:pointer;}',
+      R + ' .gc-attach-btn:hover{background:#F0F3F2; color:#33474B;}',
+      R + '.gc-legacy .gc-attach-btn{display:none;}',
+      R + ' .gc-send{width:33px; height:33px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; border:none; border-radius:9px; background:#E3EEEB; color:#9AB0AB; cursor:pointer; transition:background .15s ease,color .15s ease;}',
+      R + ' .gc-send.has-text{background:#2D6A62; color:#fff;}',
+      R + ' .gc-send:disabled{opacity:.5; cursor:not-allowed;}',
+      R + ' .gc-attach{display:none; margin-bottom:7px;}',
+      R + ' .gc-attach.show{display:flex; align-items:center; gap:8px; width:fit-content; max-width:100%; padding:4px 6px 4px 10px; background:#fff; border:1px solid #DDE3E1; border-radius:999px; font-size:10.5px; color:#33474B;}',
+      R + ' .gc-attach-name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}',
+      R + ' .gc-attach button{border:none; background:#EEF2F1; color:#5B6B68; width:18px; height:18px; border-radius:50%; cursor:pointer; line-height:1; font-size:12px;}',
+      R + ' .gc-disclaimer{display:flex; align-items:center; gap:6px; margin-top:9px; font-size:10.5px; color:#7F8D8A;}',
+      R + ' .gc-hint{margin-top:4px; font-size:9.5px; color:#A7B1AE;}',
+      R + ' .gw-alert{margin-bottom:8px;}',
+      '@media (max-width:760px){' + R + ' .gc-side{display:none;} ' + R + ' .gc-brand-tag,' + R + ' .gc-user,' + R + ' .gc-settings span,' + R + ' .gc-btn span{display:none;} ' + R + ' .gc-agent-head{padding:0 12px;}}',
+    ].join('\n');
+  }
 
   var style = document.createElement('style');
   style.textContent = [
@@ -171,11 +379,12 @@
     '#' + ROOT_ID + ' .gw-card-actions button.secondary{background:#fff; color:var(--gw-text-secondary); border-color:var(--gw-border);}',
     '#' + ROOT_ID + ' .gw-card-actions button:disabled{opacity:.5; cursor:not-allowed;}',
   ].join('\n');
+  if (isConsole) style.textContent += '\n' + consoleCss();
   document.head.appendChild(style);
 
   var root = document.createElement('div');
   root.id = ROOT_ID;
-  root.innerHTML = [
+  root.innerHTML = isConsole ? consoleHtml() : [
     '<button class="gw-launcher" id="gwLauncher" type="button" aria-label="Open chat">',
     '  <span class="gw-ping" id="gwPing"></span>',
     '  <svg class="gw-chat-icon" viewBox="0 0 24 24" fill="none"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
@@ -212,6 +421,7 @@
     '  </div>',
     '</div>',
   ].join('\n');
+  if (isConsole) { root.classList.add('gc-root'); if (!isOAuth) root.classList.add('gc-legacy'); }
   document.body.appendChild(root);
 
   var $ = function (id) { return document.getElementById(id); };
@@ -219,7 +429,20 @@
   var sidebar = $('gwSidebar'), sidebarList = $('gwSidebarList');
   var body = $('gwBody'), title = $('gwTitle');
   var form = $('gwComposerForm'), input = $('gwInput'), sendBtn = $('gwSendBtn');
-  var streamState = $('gwStreamState'), alertSlot = $('gwAlertSlot');
+  var streamStateEl = $('gwStreamState'), alertSlot = $('gwAlertSlot');
+  var streamState = streamStateEl;
+  if (isConsole) {
+    streamState = {};
+    Object.defineProperty(streamState, 'textContent', {
+      get: function () { return streamStateEl.textContent; },
+      set: function (v) {
+        var st = v === 'Idle' ? 'ready' : (v === 'Error' ? 'error' : 'busy');
+        streamStateEl.textContent = v === 'Idle' ? 'Ready' : v;
+        var pill = document.getElementById('gwPill');
+        if (pill) pill.setAttribute('data-state', st);
+      },
+    });
+  }
 
   var state = { conversationId: null, sending: false, idpUserId: cfg.idpUserId || '', messages: [], historyTitle: '' };
   var oauth = { status: 'loading', session: null, claims: null, pending: null, waiting: null, popup: null, waitTimer: null, refreshing: null, note: '', turn: null, turnHandler: null };
@@ -369,6 +592,7 @@
   }
 
   function renderEmptyState(statusLine) {
+    if (isConsole) { syncPill(); if (consoleReady()) { renderHero(); return; } }
     var needsId = !state.idpUserId;
     body.innerHTML =
       '<div class="gw-empty" id="gwEmpty">' +
@@ -673,6 +897,16 @@
   }
 
   function updateUserInfo() {
+    if (isConsole) {
+      var on = !!(isOAuth && oauth.session);
+      var cc = (on && oauth.claims) || {};
+      var em = cc.email || cc.preferred_username || '';
+      $('gwUserName').textContent = on ? (cc.name || (em ? em.split('@')[0] : 'Signed in')) : '';
+      $('gwUserEmail').textContent = on ? em : '';
+      $('gwSignOut').style.display = on ? '' : 'none';
+      syncPill();
+      return;
+    }
     var el = $('gwUserInfo');
     if (!el) return;
     if (!isOAuth || !oauth.session) { el.innerHTML = ''; return; }
@@ -968,13 +1202,22 @@
 
     try {
       if (!state.conversationId) state.conversationId = await hlCreateConversation();
+      var fileId = '';
+      if (state.pendingFile) {
+        streamState.textContent = 'Uploading\u2026';
+        fileId = await hlUploadFile(state.pendingFile);
+        renderNote('Attached: ' + state.pendingFile.name);
+        state.pendingFile = null;
+        if (fileInput) fileInput.value = '';
+        renderAttachChip();
+      }
       renderTyping();
       streamState.textContent = 'Streaming response\u2026';
       oauth.turnHandler = makeEventHandler();
       var res = await hlFetch('conversations/' + enc(state.conversationId) + '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ message: message, stream: true }),
+        body: JSON.stringify(fileId ? { message: message, stream: true, file_id: fileId } : { message: message, stream: true }),
       });
       if (!res.ok || !res.body) throw await httpError(res, 'Message request failed');
       oauth.turn = await consumeSSE(res, oauth.turnHandler, null);
@@ -1032,6 +1275,103 @@
     }
   }
 
+  // ---- console layout wiring ---------------------------------------------
+  var syncSend = function () { if (isConsole) sendBtn.classList.toggle('has-text', !!input.value.trim()); };
+  var attachBtn = $('gwAttachBtn'), fileInput = $('gwFile'), attachChip = $('gwAttachChip');
+  var MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+  function consoleReady() { return isOAuth ? oauth.status === 'signedin' : !!state.idpUserId; }
+
+  // The status pill under the agent name: Ready / Sign in required / busy states.
+  function syncPill() {
+    if (!isConsole || state.sending) return;
+    var txt, st;
+    if (consoleReady()) { txt = 'Ready'; st = 'ready'; }
+    else if (isOAuth && oauth.status === 'waiting') { txt = 'Signing in\u2026'; st = 'busy'; }
+    else if (isOAuth && oauth.status === 'loading') { txt = 'Checking sign-in\u2026'; st = 'busy'; }
+    else { txt = 'Sign in required'; st = 'idle'; }
+    streamStateEl.textContent = txt;
+    var pill = $('gwPill');
+    if (pill) pill.setAttribute('data-state', st);
+  }
+
+  function renderHero() {
+    var C = CONSOLE_COPY;
+    body.innerHTML =
+      '<div class="gw-empty gc-hero" id="gwEmpty">' +
+      '  <div class="gc-hero-icon">' + svgIcon('headset', 28) + '</div>' +
+      '  <h2 class="gc-hero-title">' + escapeHtml(cfg.interfaceName) + '</h2>' +
+      '  <p class="gc-hero-desc">' + escapeHtml(C.description) + '</p>' +
+      '  <div class="gc-hero-company">' + escapeHtml(C.company) + '</div>' +
+      '  <div class="gc-chips">' + C.capabilities.map(function (c) { return '<span class="gc-chip">' + escapeHtml(c) + '</span>'; }).join('') + '</div>' +
+      '</div>';
+  }
+
+  function renderAttachChip() {
+    if (!attachChip) return;
+    if (!state.pendingFile) { attachChip.className = 'gc-attach'; attachChip.innerHTML = ''; return; }
+    attachChip.className = 'gc-attach show';
+    attachChip.innerHTML = '<span class="gc-attach-name">' + escapeHtml(state.pendingFile.name) + '</span>' +
+      '<button type="button" id="gwAttachRemove" aria-label="Remove attachment">\u00d7</button>';
+    $('gwAttachRemove').addEventListener('click', function () {
+      state.pendingFile = null;
+      if (fileInput) fileInput.value = '';
+      renderAttachChip();
+    });
+  }
+
+  // Headless API: upload first, then send the returned file_id with the message.
+  async function hlUploadFile(file) {
+    var fd = new FormData();
+    fd.append('file', file, file.name);
+    var res = await hlFetch('conversations/' + enc(state.conversationId) + '/upload', { method: 'POST', body: fd });
+    if (!res.ok) throw await httpError(res, 'Could not upload the file');
+    var d = await res.json().catch(function () { return {}; });
+    if (!d.file_id) throw new Error('The upload response did not include a file_id.');
+    return d.file_id;
+  }
+
+  if (isConsole) {
+    var logoImg = root.querySelector('.gc-logo-img');
+    if (logoImg) logoImg.addEventListener('error', function () {
+      logoImg.style.display = 'none';
+      var fb = root.querySelector('.gc-logo-fallback');
+      if (fb) fb.style.display = 'flex';
+    });
+
+    var quickBtns = root.querySelectorAll('.gc-quick-btn');
+    for (var qi = 0; qi < quickBtns.length; qi++) {
+      quickBtns[qi].addEventListener('click', function () {
+        if (state.sending) return;
+        if (!consoleReady()) { renderEmptyState(); return; }
+        handleSend(this.getAttribute('data-q'));
+      });
+    }
+    input.addEventListener('input', syncSend);
+    $('gwSignOut').addEventListener('click', function () { if (isOAuth) signOut(); });
+
+    if (attachBtn && fileInput) {
+      attachBtn.addEventListener('click', function () {
+        if (!consoleReady()) { renderEmptyState(); return; }
+        fileInput.click();
+      });
+      fileInput.addEventListener('change', function () {
+        var f = fileInput.files && fileInput.files[0];
+        if (!f) return;
+        if (f.size > MAX_UPLOAD_BYTES) {
+          fileInput.value = '';
+          showAlert('That file is larger than 20 MB.');
+          return;
+        }
+        clearAlert();
+        state.pendingFile = f;
+        renderAttachChip();
+      });
+    }
+    syncSend();
+    syncPill();
+  }
+
   function paintMessage(role, text) {
     var empty = $('gwEmpty');
     if (empty) empty.remove();
@@ -1066,6 +1406,7 @@
   function clearAlert() { alertSlot.innerHTML = ''; }
 
   function autoGrow() {
+    syncSend();
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 100) + 'px';
   }
