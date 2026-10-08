@@ -32,6 +32,14 @@
  *   window.GenieWidget.open();
  *   window.GenieWidget.close();
  *
+ * OAuth 2.0 (PKCE) mode — each person signs in with Workato Identity and the
+ * widget talks to the Headless API as them (no shared API key, no email
+ * lookup). Turn it on with data-auth-mode="oauth", or on widget.html with
+ * the URL  /widget?auth=oauth&genie=gin-XXXX&name=My%20Genie  (widget.html
+ * opts in to reading those params via data-url-params="true"). Needs
+ * OAUTH_CLIENT_ID on the server and oauth-callback.html registered as the
+ * client's redirect URL. History then comes from the Headless API itself.
+ *
  * Chat history: saved through the backend to a Workato Data Table
  * (GET/POST /api/history), keyed by idpUserId — NOT localStorage anymore.
  * This means history now follows the person across browsers and devices,
@@ -58,7 +66,19 @@
     userEmail: (thisScript && thisScript.getAttribute('data-user-email')) || '',
     ssoClientId: (thisScript && thisScript.getAttribute('data-sso-client-id')) || '',
     ssoTenantId: (thisScript && thisScript.getAttribute('data-sso-tenant-id')) || '',
+    authMode: (thisScript && thisScript.getAttribute('data-auth-mode')) || '',
+    oauth: null, // filled from /api/health when authMode is "oauth"
   };
+  // widget.html (and only pages that opt in) may be configured from the URL.
+  if (thisScript && thisScript.getAttribute('data-url-params') === 'true') {
+    try {
+      var qp = new URLSearchParams(window.location.search);
+      if (/^gin-[\w-]+$/.test(qp.get('genie') || '')) cfg.genieId = qp.get('genie');
+      if (qp.get('auth') === 'oauth') cfg.authMode = 'oauth';
+      if (qp.get('name')) cfg.interfaceName = qp.get('name').slice(0, 60);
+    } catch (e) { /* ignore */ }
+  }
+  var isOAuth = cfg.authMode === 'oauth';
 
   var ROOT_ID = 'genie-widget-root';
   if (document.getElementById(ROOT_ID)) return; // already injected
@@ -142,6 +162,14 @@
     '#' + ROOT_ID + ' .gw-send svg{width:14px; height:14px;}',
     '#' + ROOT_ID + ' .gw-foot-row{display:flex; justify-content:space-between; align-items:center; margin-top:.45rem; font-size:.64rem; color:var(--gw-text-muted);}',
     '#' + ROOT_ID + ' .gw-alert{display:flex; gap:.5rem; padding:.55rem .7rem; border-radius:.3rem; font-size:.73rem; line-height:1.45; margin-bottom:.7rem; border:1px solid var(--gw-danger); background:#FBEDED; color:var(--gw-danger);}',
+    '#' + ROOT_ID + ' .gw-note{font-size:.7rem; color:var(--gw-text-muted); text-align:center; line-height:1.4;}',
+    '#' + ROOT_ID + ' .gw-link{color:var(--gw-primary); text-decoration:none; cursor:pointer;}',
+    '#' + ROOT_ID + ' .gw-card-note{border:1px solid var(--gw-border); background:var(--gw-surface-2); border-radius:.4rem; padding:.6rem .7rem; font-size:.76rem; color:var(--gw-text-secondary);}',
+    '#' + ROOT_ID + ' .gw-card-note pre{margin:.45rem 0 0; padding:.45rem; max-height:140px; overflow:auto; background:#fff; border:1px solid var(--gw-border-light); border-radius:.3rem; font-family:var(--gw-mono); font-size:.68rem; white-space:pre-wrap; word-break:break-word;}',
+    '#' + ROOT_ID + ' .gw-card-actions{display:flex; gap:.4rem; margin-top:.55rem;}',
+    '#' + ROOT_ID + ' .gw-card-actions button{border:1px solid var(--gw-primary); background:var(--gw-primary); color:#fff; border-radius:.3rem; font-size:.72rem; font-weight:600; padding:.35rem .75rem; cursor:pointer;}',
+    '#' + ROOT_ID + ' .gw-card-actions button.secondary{background:#fff; color:var(--gw-text-secondary); border-color:var(--gw-border);}',
+    '#' + ROOT_ID + ' .gw-card-actions button:disabled{opacity:.5; cursor:not-allowed;}',
   ].join('\n');
   document.head.appendChild(style);
 
@@ -180,7 +208,7 @@
     '      <textarea id="gwInput" rows="1" placeholder="What can you help me with?" aria-label="Message"></textarea>',
     '      <button class="gw-send" id="gwSendBtn" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24" fill="none"><path d="M22 2 11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2 15 22l-4-9-9-4 20-7Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>',
     '    </form>',
-    '    <div class="gw-foot-row"><span id="gwStreamState">Idle</span></div>',
+    '    <div class="gw-foot-row"><span id="gwStreamState">Idle</span><span id="gwUserInfo"></span></div>',
     '  </div>',
     '</div>',
   ].join('\n');
@@ -194,6 +222,7 @@
   var streamState = $('gwStreamState'), alertSlot = $('gwAlertSlot');
 
   var state = { conversationId: null, sending: false, idpUserId: cfg.idpUserId || '', messages: [], historyTitle: '' };
+  var oauth = { status: 'loading', session: null, claims: null, pending: null, waiting: null, popup: null, waitTimer: null, refreshing: null, note: '', turn: null, turnHandler: null };
   title.textContent = cfg.interfaceName;
 
   function api(path) { return (cfg.baseUrl || '') + path; }
@@ -283,6 +312,7 @@
   }
 
   function openHistoryItem(entry) {
+    if (isOAuth && entry.messages === null) { loadConversationOAuth(entry); return; }
     state.conversationId = entry.id;
     state.messages = entry.messages.slice();
     state.historyTitle = entry.title;
@@ -320,6 +350,7 @@
       var data = await res.json();
       if (!cfg.genieId && data.defaultGenieId) cfg.genieId = data.defaultGenieId;
       if (!cfg.dataCenter && data.defaultDataCenter) cfg.dataCenter = data.defaultDataCenter;
+      if (data.oauthClientId) cfg.oauth = { clientId: data.oauthClientId, authorizeUrl: data.oauthAuthorizeUrl, redirectUri: data.oauthRedirectUri, scope: data.oauthScope };
     } catch (e) { /* backend unreachable — widget still works if data attrs were set explicitly */ }
   })();
 
@@ -342,12 +373,13 @@
     body.innerHTML =
       '<div class="gw-empty" id="gwEmpty">' +
       '  <div class="gw-glyph"><svg viewBox="0 0 24 24" fill="none"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>' +
-      (needsId
+      (isOAuth ? oauthEmptyInner(statusLine) : needsId
         ? '  <h3>Sign in to start</h3><p>Enter your email once to start chatting.</p>' +
           '  <div class="gw-id-field"><input id="gwIdInput" type="text" placeholder="you@company.com" spellcheck="false" /><button id="gwIdSubmit" type="button">Start</button></div>' +
           (statusLine ? '  <p style="margin-top:.5rem;font-size:.7rem;color:var(--gw-text-muted);">' + escapeHtml(statusLine) + '</p>' : '')
         : '  <h3>No conversation yet</h3><p>Send a message below to get started.</p>') +
       '</div>';
+    if (isOAuth) { wireOAuthEmpty(); return; }
     if (needsId) {
       var go = function () {
         var v = $('gwIdInput').value.trim();
@@ -423,6 +455,7 @@
 
   (async function identify() {
     await defaultsReady;
+    if (isOAuth) { await initOAuth(); return; }
     if (state.idpUserId) { loadHistoryFromServer(); return; }
     var knownEmail = cfg.userEmail || getQueryEmail();
     if (knownEmail) {
@@ -431,6 +464,573 @@
       await trySilentSSO();
     }
   })();
+
+  // =====================================================================
+  // OAuth 2.0 (PKCE) mode — enabled with ?auth=oauth (widget page) or
+  // data-auth-mode="oauth". Signs the person in through Workato Identity
+  // and talks to the Headless API as THAT user (no shared API key, no
+  // email lookup). Everything below is inert unless isOAuth is true.
+  // =====================================================================
+  var memStore = {};
+  function storeGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return memStore[k] || null; } }
+  function storeSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { memStore[k] = v; } }
+  function storeDel(k) { try { window.localStorage.removeItem(k); } catch (e) { /* ignore */ } delete memStore[k]; }
+  function sessionKey() { return 'genie_oauth_v1:' + (cfg.genieId || ''); }
+  function enc(v) { return encodeURIComponent(v); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function inIframe() { try { return window.top !== window.self; } catch (e) { return true; } }
+
+  function b64url(buf) {
+    var bytes = new Uint8Array(buf), s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function randomUrlSafe(len) {
+    var a = new Uint8Array(len);
+    window.crypto.getRandomValues(a);
+    return b64url(a).slice(0, len);
+  }
+  // code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))
+  async function makePending() {
+    var verifier = randomUrlSafe(64);
+    var digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    oauth.pending = { verifier: verifier, challenge: b64url(digest), state: randomUrlSafe(32) };
+  }
+  function decodeJwt(token) {
+    try {
+      var p = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (p.length % 4) p += '=';
+      var bin = atob(p), bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (e) { return null; }
+  }
+
+  function saveSession(tok) {
+    var prev = oauth.session || {};
+    oauth.session = {
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token || prev.refresh_token || '', // refresh tokens rotate — always keep the newest
+      id_token: tok.id_token || prev.id_token || '',
+      expires_at: Date.now() + (Number(tok.expires_in) || 3600) * 1000,
+    };
+    oauth.claims = decodeJwt(oauth.session.id_token); // display only — never trusted for access decisions
+    storeSet(sessionKey(), JSON.stringify(oauth.session));
+  }
+  function loadSession() {
+    try {
+      var raw = storeGet(sessionKey());
+      if (!raw) return false;
+      oauth.session = JSON.parse(raw);
+      oauth.claims = decodeJwt(oauth.session.id_token || '');
+      return !!(oauth.session && oauth.session.access_token);
+    } catch (e) { return false; }
+  }
+  function clearSession() { oauth.session = null; oauth.claims = null; storeDel(sessionKey()); }
+
+  // Back-channel token calls go through this site's own worker (same-origin).
+  async function tokenCall(payload) {
+    var res = await fetch(api('/api/oauth/token'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok || !data.access_token) {
+      var err = new Error(data.error_description || data.error || ('Token request failed (' + res.status + ')'));
+      err.status = res.status;
+      err.oauthError = data.error;
+      throw err;
+    }
+    return data;
+  }
+
+  // Refresh tokens are single-use, so only ever one refresh in flight.
+  function refreshSession() {
+    if (oauth.refreshing) return oauth.refreshing;
+    var rt = oauth.session && oauth.session.refresh_token;
+    if (!rt) return Promise.resolve(false);
+    oauth.refreshing = tokenCall({ grant_type: 'refresh_token', refresh_token: rt })
+      .then(function (t) { saveSession(t); return true; })
+      .catch(function (err) {
+        // Only a definitive rejection ends the session; a network blip keeps it.
+        if (err.oauthError === 'invalid_grant' || err.status === 400 || err.status === 401) clearSession();
+        return false;
+      })
+      .then(function (ok) { oauth.refreshing = null; return ok; });
+    return oauth.refreshing;
+  }
+  async function getAccessToken() {
+    if (!oauth.session) return null;
+    if (oauth.session.expires_at - 60000 > Date.now()) return oauth.session.access_token;
+    return (await refreshSession()) && oauth.session ? oauth.session.access_token : null;
+  }
+
+  function requireLogin(note) {
+    oauth.status = 'signedout';
+    oauth.note = note || '';
+    updateUserInfo();
+    if (!body.querySelector('.gw-msg')) renderEmptyState();
+    else showAlert(note || 'Please sign in again.');
+  }
+
+  function authorizeUrl(p) {
+    var c = cfg.oauth;
+    return c.authorizeUrl +
+      '?response_type=code' +
+      '&client_id=' + enc(c.clientId) +
+      '&redirect_uri=' + enc(c.redirectUri) +
+      '&scope=' + enc(c.scope || 'openid profile email') +
+      '&state=' + enc(p.state) +
+      '&code_challenge=' + enc(p.challenge) +
+      '&code_challenge_method=S256';
+  }
+
+  // Must run synchronously inside the click so the browser allows the popup,
+  // which is why the PKCE values are prepared ahead of time (makePending).
+  function startSignIn() {
+    if (!cfg.oauth || !cfg.oauth.clientId) return;
+    if (!oauth.pending) { makePending().then(startSignIn); return; }
+    var p = oauth.pending;
+    oauth.pending = null;
+    var url = authorizeUrl(p);
+
+    if (!inIframe()) {
+      // Own tab: a normal full-page redirect; oauth-callback.html finishes it.
+      try {
+        window.sessionStorage.setItem('genie_oauth_pending', JSON.stringify({
+          state: p.state, verifier: p.verifier, redirectUri: cfg.oauth.redirectUri,
+          genieId: cfg.genieId, returnUrl: window.location.href,
+        }));
+      } catch (e) { showAlert('Your browser blocked the storage needed to sign in.'); makePending(); return; }
+      window.location.assign(url);
+      return;
+    }
+
+    // Embedded (e.g. SharePoint): Workato Identity can't load inside a frame,
+    // so sign in through a popup and receive the result via postMessage.
+    var popup = window.open(url, 'genie_oauth', 'width=520,height=720');
+    makePending(); // fresh values ready for the next attempt
+    if (!popup) {
+      oauth.status = 'signedout';
+      oauth.note = 'Your browser blocked the sign-in window. Allow pop-ups for this site, or open the chat in a new tab.';
+      renderEmptyState();
+      return;
+    }
+    oauth.popup = popup;
+    oauth.waiting = p;
+    oauth.status = 'waiting';
+    oauth.note = '';
+    renderEmptyState();
+    clearTimeout(oauth.waitTimer);
+    oauth.waitTimer = setTimeout(function () {
+      if (oauth.waiting !== p) return;
+      oauth.waiting = null;
+      oauth.status = 'signedout';
+      oauth.note = 'Sign-in timed out. Please try again.';
+      renderEmptyState();
+    }, 5 * 60 * 1000);
+  }
+
+  if (isOAuth) {
+    window.addEventListener('message', async function (ev) {
+      if (ev.origin !== window.location.origin) return;           // only our own callback page
+      var d = ev.data;
+      if (!d || d.source !== 'genie-oauth') return;
+      var p = oauth.waiting;
+      if (!p || d.state !== p.state) return;                       // CSRF check
+      oauth.waiting = null;
+      clearTimeout(oauth.waitTimer);
+      if (d.error || !d.code) {
+        oauth.status = 'signedout';
+        oauth.note = 'Sign-in failed: ' + (d.error_description || d.error || 'no authorization code returned');
+        renderEmptyState();
+        return;
+      }
+      try {
+        var t = await tokenCall({ grant_type: 'authorization_code', code: d.code, code_verifier: p.verifier, redirect_uri: cfg.oauth.redirectUri });
+        saveSession(t);
+        oauth.status = 'signedin';
+        oauth.note = '';
+        renderEmptyState();
+        updateUserInfo();
+        loadHistoryOAuth();
+      } catch (err) {
+        oauth.status = 'signedout';
+        oauth.note = 'Sign-in failed: ' + err.message;
+        renderEmptyState();
+      }
+    });
+  }
+
+  function signOut() {
+    clearSession();
+    history = [];
+    oauth.status = 'signedout';
+    oauth.note = '';
+    updateUserInfo();
+    startNewChat();
+  }
+
+  function updateUserInfo() {
+    var el = $('gwUserInfo');
+    if (!el) return;
+    if (!isOAuth || !oauth.session) { el.innerHTML = ''; return; }
+    var c = oauth.claims || {};
+    var who = c.email || c.name || c.preferred_username || 'Signed in';
+    el.innerHTML = '<span>' + escapeHtml(who) + '</span> \u00b7 <a href="#" class="gw-link" id="gwSignOut">Sign out</a>';
+    $('gwSignOut').addEventListener('click', function (e) { e.preventDefault(); signOut(); });
+  }
+
+  function oauthEmptyInner(statusLine) {
+    var openTab = inIframe()
+      ? '<p style="margin-top:.4rem;font-size:.7rem;">Trouble signing in? <a href="#" class="gw-link" id="gwOpenTab">Open chat in a new tab</a></p>'
+      : '';
+    var note = (oauth.note || statusLine)
+      ? '<p style="margin-top:.4rem;font-size:.72rem;color:var(--gw-danger);">' + escapeHtml(oauth.note || statusLine) + '</p>'
+      : '';
+    switch (oauth.status) {
+      case 'loading':
+        return '  <h3>Checking sign-in\u2026</h3>';
+      case 'unconfigured':
+        return '  <h3>Sign-in isn\u2019t available</h3><p>The Genie Connect server didn\u2019t return OAuth settings. Check that OAUTH_CLIENT_ID is set.</p>';
+      case 'waiting':
+        return '  <h3>Finish signing in</h3><p>Complete the sign-in in the window that just opened.</p>' + openTab;
+      case 'signedin':
+        return '  <h3>No conversation yet</h3><p>Send a message below to get started.</p>';
+      default:
+        return '  <h3>Sign in to start</h3><p>Sign in with your Workato Identity account to chat.</p>' +
+          '  <div class="gw-id-field"><button id="gwSignIn" type="button" style="flex:1;padding:.6rem 1rem;">Sign in with Workato</button></div>' +
+          note + openTab;
+    }
+  }
+  function wireOAuthEmpty() {
+    var b = $('gwSignIn'); if (b) b.addEventListener('click', startSignIn);
+    var t = $('gwOpenTab');
+    if (t) t.addEventListener('click', function (e) { e.preventDefault(); window.open(window.location.href, '_blank'); });
+  }
+
+  async function initOAuth() {
+    if (!cfg.oauth || !cfg.oauth.clientId || !window.crypto || !window.crypto.subtle) {
+      oauth.status = 'unconfigured';
+      renderEmptyState();
+      return;
+    }
+    await makePending();
+    if (loadSession()) {
+      var tok = await getAccessToken();
+      if (tok) {
+        oauth.status = 'signedin';
+        renderEmptyState();
+        updateUserInfo();
+        loadHistoryOAuth();
+        return;
+      }
+    }
+    oauth.status = 'signedout';
+    renderEmptyState();
+  }
+
+  // ---- Headless API calls (as the signed-in user) ----------------------
+  async function hlFetch(path, init) {
+    init = init || {};
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var tok = await getAccessToken();
+      if (!tok) { requireLogin('Your session expired. Sign in again to continue.'); throw new Error('Not signed in'); }
+      var headers = Object.assign({}, init.headers || {}, { Authorization: 'Bearer ' + tok });
+      var res = await fetch(api('/api/headless/' + enc(cfg.genieId) + '/' + path), Object.assign({}, init, { headers: headers }));
+      if (res.status === 401 && attempt === 0 && oauth.session) { oauth.session.expires_at = 0; continue; } // force one refresh, then retry
+      return res;
+    }
+    throw new Error('Request failed');
+  }
+  async function httpError(res, prefix) {
+    var t = await res.text().catch(function () { return ''; });
+    var m = '';
+    try {
+      var j = JSON.parse(t);
+      m = j.error_description || j.error || j.message || '';
+      if (typeof m !== 'string') m = JSON.stringify(m);
+    } catch (e) { m = t.slice(0, 200); }
+    return new Error((prefix || 'Request failed') + ' (' + res.status + ')' + (m ? ': ' + m : ''));
+  }
+
+  async function hlCreateConversation() {
+    var res = await hlFetch('conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) throw await httpError(res, 'Failed to create conversation');
+    var data = await res.json().catch(function () { return {}; });
+    var id = data.conversation_id || (data.result && data.result.conversation_id);
+    if (!id) throw new Error('Response did not include a conversation_id.');
+    return id;
+  }
+
+  // Reads one SSE response. Returns where the genie run stands so the
+  // caller can decide whether to reconnect.
+  async function consumeSSE(res, onEvent, prev) {
+    var turn = {
+      runId: (prev && prev.runId) || '', lastEventId: (prev && prev.lastEventId) || '',
+      finished: false, interrupted: false, awaiting: false, retryAfter: 0,
+    };
+    function handleBlock(block) {
+      var dataLines = [], evName = '', id = '';
+      block.split(/\r?\n/).forEach(function (l) {
+        if (l.indexOf('data:') === 0) dataLines.push(l.slice(5).replace(/^ /, ''));
+        else if (l.indexOf('event:') === 0) evName = l.slice(6).trim();
+        else if (l.indexOf('id:') === 0) id = l.slice(3).trim();
+      });
+      if (!dataLines.length) return;
+      var raw = dataLines.join('\n');
+      if (raw === '[DONE]') return;
+      var ev;
+      try { ev = JSON.parse(raw); } catch (e) { return; }
+      if (!ev.type && evName) ev.type = evName;
+      var eid = id || ev.event_id;
+      if (eid) turn.lastEventId = eid;
+      if (ev.genie_run_id) turn.runId = ev.genie_run_id;
+      if (ev.type === 'processing.finished') turn.finished = true;
+      if (ev.type === 'system.stream_interrupted') { turn.interrupted = true; turn.retryAfter = Number(ev.retry_after_ms) || 0; }
+      if (ev.type === 'skill.confirmation_required' || ev.type === 'runtime_connection.auth_required') turn.awaiting = true;
+      onEvent(ev);
+    }
+    var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
+    while (true) {
+      var out = await reader.read();
+      if (out.done) break;
+      buf += dec.decode(out.value, { stream: true });
+      var parts = buf.split(/\r?\n\r?\n/);
+      buf = parts.pop();
+      for (var i = 0; i < parts.length; i++) handleBlock(parts[i]);
+    }
+    if (buf.trim()) handleBlock(buf);
+    return turn;
+  }
+
+  // Reconnect to a run (after a dropped stream, or after an approval) until it finishes.
+  async function followRun(turn) {
+    var tries = 0;
+    while (!turn.finished && !turn.awaiting && turn.runId && tries < 8) {
+      tries++;
+      if (turn.interrupted || tries > 1) await sleep(turn.retryAfter || 1500);
+      var headers = { Accept: 'text/event-stream' };
+      if (turn.lastEventId) headers['Last-Event-ID'] = turn.lastEventId;
+      var res = await hlFetch('conversations/' + enc(state.conversationId) + '/genie-runs/' + enc(turn.runId), { method: 'GET', headers: headers });
+      if (!res.ok || !res.body) throw await httpError(res, 'Could not reconnect to the response');
+      turn = await consumeSSE(res, oauth.turnHandler, turn);
+    }
+    return turn;
+  }
+
+  function renderNote(text) {
+    var d = document.createElement('div');
+    d.className = 'gw-note';
+    d.textContent = text;
+    body.appendChild(d);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function makeEventHandler() {
+    return function (ev) {
+      switch (ev.type) {
+        case 'agent.message': {
+          var text = typeof ev.message === 'string' ? ev.message : (ev.message && (ev.message.content || ev.message.text)) || '';
+          if (!text) return;
+          removeTyping();
+          renderMessage('assistant', text);
+          break;
+        }
+        case 'skill.running':
+          streamState.textContent = 'Running ' + (ev.skill_name || 'a skill') + '\u2026';
+          break;
+        case 'skill.completed':
+        case 'skill.stopped':
+          streamState.textContent = 'Finished ' + (ev.skill_name || 'a skill');
+          break;
+        case 'skill.failed':
+          renderNote('A step failed: ' + (ev.skill_name || 'skill') + (ev.error ? ' \u2014 ' + (typeof ev.error === 'string' ? ev.error : JSON.stringify(ev.error)) : ''));
+          break;
+        case 'skill.confirmation_required':
+          removeTyping();
+          renderApprovalCard(ev);
+          break;
+        case 'runtime_connection.auth_required':
+          removeTyping();
+          renderConnectCard(ev);
+          break;
+        default: break; // processing.*, system.ping, … need no UI
+      }
+    };
+  }
+
+  function cardShell(html) {
+    var wrap = document.createElement('div');
+    wrap.className = 'gw-card-note';
+    wrap.innerHTML = html;
+    body.appendChild(wrap);
+    body.scrollTop = body.scrollHeight;
+    return wrap;
+  }
+
+  function renderApprovalCard(ev) {
+    var params = '';
+    try { params = ev.skill_parameters ? JSON.stringify(ev.skill_parameters, null, 2).slice(0, 1500) : ''; } catch (e) {}
+    var card = cardShell(
+      '<div>Approval needed to run <b>' + escapeHtml(ev.skill_name || 'a skill') + '</b></div>' +
+      (params ? '<pre>' + escapeHtml(params) + '</pre>' : '') +
+      '<div class="gw-card-actions"><button type="button" data-r="approved">Approve</button><button type="button" class="secondary" data-r="rejected">Reject</button></div>'
+    );
+    var btns = card.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', async function () {
+        var resolution = this.getAttribute('data-r');
+        for (var j = 0; j < btns.length; j++) btns[j].disabled = true;
+        try {
+          var res = await hlFetch('conversations/' + enc(state.conversationId) + '/skill_approval/' + enc(ev.call_id), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: resolution }),
+          });
+          if (!res.ok) throw await httpError(res, 'Could not record your decision');
+          card.querySelector('.gw-card-actions').outerHTML = '<div class="gw-note">' + (resolution === 'approved' ? 'Approved.' : 'Rejected.') + '</div>';
+          resumeTurn();
+        } catch (err) {
+          showAlert(err.message);
+          for (var k = 0; k < btns.length; k++) btns[k].disabled = false;
+        }
+      });
+    }
+  }
+
+  function renderConnectCard(ev) {
+    var connector = (ev.auth_link && ev.auth_link.connector_name) || 'an app';
+    var card = cardShell(
+      '<div>The genie needs you to connect <b>' + escapeHtml(connector) + '</b> to continue.</div>' +
+      '<div class="gw-card-actions"><button type="button" data-a="connect">Connect</button><button type="button" class="secondary" data-a="skip">Skip</button></div>'
+    );
+    var actions = card.querySelector('.gw-card-actions');
+    actions.querySelector('[data-a="connect"]').addEventListener('click', async function () {
+      var btn = this; btn.disabled = true;
+      try {
+        var url = ev.auth_link && ev.auth_link.url;
+        var status = url ? 'auth_required' : '';
+        if (!url) {
+          var res = await hlFetch('runtime_connection/' + enc(ev.runtime_connection_attempt_id) + '/link', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+          if (!res.ok) throw await httpError(res, 'Could not get the connection link');
+          var d = await res.json().catch(function () { return {}; });
+          status = d.status; url = d.auth_link && d.auth_link.url;
+        }
+        if (status === 'authorized' || !url) { actions.outerHTML = '<div class="gw-note">Already connected.</div>'; resumeTurn(); return; }
+        window.open(url, '_blank');
+        actions.innerHTML = '<button type="button" data-a="continue">I\u2019ve connected \u2014 continue</button>';
+        actions.querySelector('[data-a="continue"]').addEventListener('click', function () { actions.outerHTML = ''; resumeTurn(); });
+      } catch (err) { showAlert(err.message); btn.disabled = false; }
+    });
+    actions.querySelector('[data-a="skip"]').addEventListener('click', async function () {
+      try {
+        await hlFetch('runtime_connection/' + enc(ev.runtime_connection_attempt_id) + '/reject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        actions.outerHTML = '<div class="gw-note">Skipped.</div>';
+        resumeTurn();
+      } catch (err) { showAlert(err.message); }
+    });
+  }
+
+  async function resumeTurn() {
+    if (!oauth.turn || !oauth.turn.runId) return;
+    state.sending = true; sendBtn.disabled = true;
+    oauth.turn.awaiting = false;
+    renderTyping();
+    streamState.textContent = 'Waiting for the genie\u2026';
+    try { oauth.turn = await followRun(oauth.turn); }
+    catch (err) { showAlert(err.message); }
+    finally {
+      removeTyping();
+      state.sending = false; sendBtn.disabled = false;
+      finishTurn();
+    }
+  }
+
+  function finishTurn() {
+    var t = oauth.turn;
+    streamState.textContent = t && t.awaiting ? 'Waiting for your response\u2026' : 'Idle';
+    if (!panel.classList.contains('open')) ping.classList.add('show');
+    loadHistoryOAuth();
+  }
+
+  async function handleSendOAuth(message) {
+    if (oauth.status !== 'signedin') { renderEmptyState(); return; }
+    if (!cfg.genieId) { showAlert('No Genie ID configured (use ?genie=gin-\u2026 on the widget URL).'); return; }
+    if (!state.historyTitle) state.historyTitle = message.length > 40 ? message.slice(0, 40) + '\u2026' : message;
+
+    clearAlert();
+    state.sending = true;
+    sendBtn.disabled = true;
+    streamState.textContent = 'Connecting\u2026';
+    renderMessage('user', message);
+    input.value = '';
+    autoGrow();
+
+    try {
+      if (!state.conversationId) state.conversationId = await hlCreateConversation();
+      renderTyping();
+      streamState.textContent = 'Streaming response\u2026';
+      oauth.turnHandler = makeEventHandler();
+      var res = await hlFetch('conversations/' + enc(state.conversationId) + '/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({ message: message, stream: true }),
+      });
+      if (!res.ok || !res.body) throw await httpError(res, 'Message request failed');
+      oauth.turn = await consumeSSE(res, oauth.turnHandler, null);
+      oauth.turn = await followRun(oauth.turn); // no-op unless the stream dropped early
+      removeTyping();
+      if (!body.querySelector('.gw-msg.assistant') && !oauth.turn.awaiting) {
+        renderNote('No reply came back. Check that the genie is running.');
+      }
+      finishTurn();
+    } catch (err) {
+      removeTyping();
+      streamState.textContent = 'Error';
+      if (err.message !== 'Not signed in') showAlert(err.message);
+    } finally {
+      state.sending = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  // ---- history comes straight from the Headless API --------------------
+  async function loadHistoryOAuth() {
+    if (oauth.status !== 'signedin') return;
+    try {
+      var res = await hlFetch('conversations?limit=50', { method: 'GET', headers: { Accept: 'application/json' } });
+      var data = await res.json().catch(function () { return {}; });
+      history = (data.list || []).map(function (r) {
+        return { id: r.conversation_id, title: r.topic || 'New chat', updatedAt: r.last_updated_at || r.created_at || new Date().toISOString(), messages: null };
+      }).sort(function (a, b) { return new Date(b.updatedAt) - new Date(a.updatedAt); });
+    } catch (e) { history = []; }
+    renderHistoryList();
+  }
+
+  async function loadConversationOAuth(entry) {
+    state.conversationId = entry.id;
+    state.messages = [];
+    state.historyTitle = entry.title;
+    body.innerHTML = '';
+    setSidebarOpen(false);
+    renderHistoryList();
+    renderTyping();
+    try {
+      var res = await hlFetch('conversations/' + enc(entry.id) + '/messages?limit=100', { method: 'GET', headers: { Accept: 'application/json' } });
+      if (!res.ok) throw await httpError(res, 'Could not load this conversation');
+      var data = await res.json().catch(function () { return {}; });
+      var msgs = (data.messages || []).slice().reverse().map(function (m) { // API returns newest first
+        return { role: m.source === 'user' ? 'user' : 'assistant', text: m.content || '' };
+      });
+      removeTyping();
+      entry.messages = msgs;
+      state.messages = msgs.slice();
+      for (var i = 0; i < msgs.length; i++) paintMessage(msgs[i].role, msgs[i].text);
+    } catch (err) {
+      removeTyping();
+      if (err.message !== 'Not signed in') showAlert(err.message);
+    }
+  }
 
   function paintMessage(role, text) {
     var empty = $('gwEmpty');
@@ -526,6 +1126,7 @@
 
   async function handleSend(message) {
     if (!message || state.sending) return;
+    if (isOAuth) return handleSendOAuth(message);
     if (!state.idpUserId) { renderEmptyState(); return; }
     var genieId = cfg.genieId;
     if (!genieId) { showAlert('No Genie ID configured for this widget (data-genie-id).'); return; }
@@ -582,5 +1183,6 @@
     setEmail: function (email) { return resolveEmailToUserId(email, { silent: false }); },
     setGenieId: function (genieId) { cfg.genieId = genieId; },
     newChat: function () { startNewChat(); },
+    signOut: function () { if (isOAuth) signOut(); },
   };
 })();

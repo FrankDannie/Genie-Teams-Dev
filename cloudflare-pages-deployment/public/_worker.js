@@ -24,6 +24,8 @@
  *   GET  /api/iam/users?email=...&dataCenter=...
  *   GET  /api/history?idpUserId=...&dataCenter=...                     [chat history: list]
  *   POST /api/history                                                  [chat history: upsert]
+ *   POST /api/oauth/token                                              [OAuth 2.0 PKCE: code / refresh_token exchange with Workato Identity]
+ *   ANY  /api/headless/:genieId/<conversations...>                     [OAuth mode: passes the user's own Bearer token through to the Headless API]
  *   GET  /api/health
  *   anything else → served as a normal static file from this folder
  * -----------------------------------------------------------------------
@@ -74,6 +76,112 @@ function maskedTokenPreview(value) {
   if (!value) return null;
   if (value.length <= 6) return `${value.length} chars (too short to preview safely)`;
   return `${value.length} chars, "${value.slice(0, 2)}...${value.slice(-2)}"`;
+}
+
+// ---------------------------------------------------------------------
+// OAuth 2.0 (PKCE) mode — Workato Identity (id.workato.com)
+// ---------------------------------------------------------------------
+// The browser does the PKCE redirect itself; only the back-channel POST to
+// /oauth/token goes through here (same-origin, so no CORS). No client
+// secret exists in this flow, so nothing secret lives in this file or in
+// env — OAUTH_CLIENT_ID is just the public client_id from the genie's
+// custom chat interface settings (Agent Studio).
+//
+// Env vars (all optional except OAUTH_CLIENT_ID):
+//   OAUTH_CLIENT_ID     the genie client's oauth_client_id
+//   OAUTH_REDIRECT_URI  must match the redirect URL registered on that client.
+//                       Defaults to <this site>/oauth-callback
+//   OAUTH_SCOPE         defaults to "openid profile email" (do NOT add offline_access)
+//   OAUTH_ISSUER        defaults to https://id.workato.com
+function oauthIssuer(env) {
+  return (env.OAUTH_ISSUER || 'https://id.workato.com').replace(/\/$/, '');
+}
+function oauthRedirectUri(env, url) {
+  return (env.OAUTH_REDIRECT_URI || `${url.origin}/oauth-callback`).trim();
+}
+function oauthScope(env) {
+  return (env.OAUTH_SCOPE || 'openid profile email').trim();
+}
+
+async function handleOAuthToken(request, env, url) {
+  const clientId = (env.OAUTH_CLIENT_ID || '').trim();
+  if (!clientId) return json({ error: 'Missing OAUTH_CLIENT_ID env var' }, 500);
+
+  const body = await request.json().catch(() => ({}));
+  const form = new URLSearchParams();
+  form.set('client_id', clientId); // always the configured client — callers can't pick another one
+
+  if (body.grant_type === 'authorization_code') {
+    if (!body.code || !body.code_verifier || !body.redirect_uri) {
+      return json({ error: 'code, code_verifier and redirect_uri are required' }, 400);
+    }
+    if (body.redirect_uri !== oauthRedirectUri(env, url)) {
+      return json({ error: 'redirect_uri does not match the configured redirect URI' }, 400);
+    }
+    form.set('grant_type', 'authorization_code');
+    form.set('code', body.code);
+    form.set('code_verifier', body.code_verifier);
+    form.set('redirect_uri', body.redirect_uri);
+  } else if (body.grant_type === 'refresh_token') {
+    if (!body.refresh_token) return json({ error: 'refresh_token is required' }, 400);
+    form.set('grant_type', 'refresh_token');
+    form.set('refresh_token', body.refresh_token);
+  } else {
+    return json({ error: 'grant_type must be authorization_code or refresh_token' }, 400);
+  }
+
+  const upstream = await fetch(`${oauthIssuer(env)}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: form.toString(),
+  });
+  const text = await upstream.text();
+  return new Response(text, {
+    status: upstream.status,
+    headers: {
+      'Content-Type': upstream.headers.get('content-type') || 'application/json',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+// Only these Headless API paths (relative to /api/v1/genies/:genie/chat/) can be reached
+// through the pass-through below.
+const HEADLESS_PATH = /^(conversations(\/events)?|conversations\/[\w.:-]+(\/(messages|upload|genie-runs\/[\w.:-]+(\/feedback)?|skill_approval\/[\w.:-]+|business_approval\/[\w.:-]+))?|runtime_connection\/[\w.:-]+\/(link|reject))$/;
+
+// OAuth mode: the browser holds the user's own access token and sends it as
+// `Authorization: Bearer`. This just forwards it, so the call runs as that
+// user and no shared API key is involved. (A proxy is used instead of
+// calling genie-api.workato.com from the browser so it stays same-origin.)
+async function handleHeadless(request, env, url) {
+  const m = url.pathname.match(/^\/api\/headless\/(gin-[\w-]+)\/(.+)$/);
+  if (!m) return json({ error: 'Not found' }, 404);
+  const genieId = m[1];
+  const rest = m[2];
+  if (!HEADLESS_PATH.test(rest)) return json({ error: 'Path not allowed' }, 404);
+
+  const auth = request.headers.get('authorization') || '';
+  if (!/^Bearer\s+\S+/i.test(auth)) return json({ error: 'Missing Authorization: Bearer <access_token>' }, 401);
+
+  const headers = { Authorization: auth };
+  const ct = request.headers.get('content-type');
+  if (ct) headers['Content-Type'] = ct;
+  const accept = request.headers.get('accept');
+  if (accept) headers.Accept = accept;
+  const lastEventId = request.headers.get('last-event-id');
+  if (lastEventId) headers['Last-Event-ID'] = lastEventId;
+
+  const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
+  const upstream = await fetch(`${genieBase(genieId)}/${rest}${url.search}`, {
+    method: request.method,
+    headers,
+    body: hasBody ? await request.arrayBuffer() : undefined,
+  });
+
+  const outHeaders = { 'Cache-Control': 'no-store' };
+  const upstreamType = upstream.headers.get('content-type');
+  if (upstreamType) outHeaders['Content-Type'] = upstreamType;
+  return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
 }
 
 async function handleApi(request, env, url) {
@@ -233,6 +341,13 @@ async function handleApi(request, env, url) {
     }
   }
 
+  if (pathname === '/api/oauth/token' && request.method === 'POST') {
+    return handleOAuthToken(request, env, url);
+  }
+  if (pathname.startsWith('/api/headless/')) {
+    return handleHeadless(request, env, url);
+  }
+
   // ---------------------------------------------------------------
   // GET /api/health
   // ---------------------------------------------------------------
@@ -246,6 +361,11 @@ async function handleApi(request, env, url) {
       historyApiUrl: historyApiUrl(env), // confirms which URL is actually being called (vs. the HISTORY_API_URL override)
       defaultGenieId: env.GENIE_ID || null,
       defaultDataCenter: env.DATA_CENTER || null,
+      oauthConfigured: Boolean((env.OAUTH_CLIENT_ID || '').trim()),
+      oauthClientId: (env.OAUTH_CLIENT_ID || '').trim() || null, // public by design (PKCE — no secret)
+      oauthAuthorizeUrl: `${oauthIssuer(env)}/oauth/authorize`,
+      oauthRedirectUri: oauthRedirectUri(env, url),
+      oauthScope: oauthScope(env),
     });
   }
 
