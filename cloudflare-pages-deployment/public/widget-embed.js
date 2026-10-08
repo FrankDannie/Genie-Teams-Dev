@@ -87,6 +87,8 @@
   }
   var isOAuth = cfg.authMode === 'oauth';
   var isConsole = cfg.layout === 'console';
+  // Build stamp: open DevTools -> Console to see which script and mode actually loaded.
+  try { console.info('[Genie Connect] widget build console-1 | layout=' + (cfg.layout || 'default') + ' | auth=' + (cfg.authMode || 'api-key') + ' | genie=' + (cfg.genieId || '(server default)') + ' | url-params=' + (thisScript && thisScript.getAttribute('data-url-params') === 'true' ? 'on' : 'OFF')); } catch (e) { /* ignore */ }
 
   var ROOT_ID = 'genie-widget-root';
   if (document.getElementById(ROOT_ID)) return; // already injected
