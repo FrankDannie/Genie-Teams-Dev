@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="referrer" content="no-referrer" />
+<title>Signing in…</title>
+<style>
+  html, body { margin:0; height:100%; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; background:#F5F7FA; color:#1F2328; }
+  main { height:100%; display:flex; align-items:center; justify-content:center; text-align:center; padding:1.5rem; }
+  p { max-width:380px; line-height:1.5; font-size:.95rem; margin:0; }
+</style>
+</head>
+<body>
+<main><p id="msg">Completing sign-in…</p></main>
+<script>
+/*
+ * OAuth 2.0 (PKCE) redirect target for Workato Identity.
+ *
+ * Register THIS page's URL (https://<your-site>/oauth-callback) as the
+ * oauth_redirect_url on the genie's custom chat interface client.
+ *
+ * Two ways it gets used:
+ *  1. POPUP (chat embedded in a SharePoint page): the widget opened this
+ *     window. We hand {code, state} back to it with postMessage, and the
+ *     widget finishes the exchange (it holds the code_verifier).
+ *  2. FULL PAGE (chat opened in its own tab): the widget saved the
+ *     code_verifier in sessionStorage before leaving. We finish the
+ *     exchange here, save the session, and go back to the chat page.
+ */
+(function () {
+  var msg = document.getElementById('msg');
+  function say(t) { msg.textContent = t; }
+
+  var q = new URLSearchParams(window.location.search);
+  var code = q.get('code');
+  var state = q.get('state');
+  var error = q.get('error');
+  var errorDescription = q.get('error_description');
+
+  // Don't leave the one-time code sitting in the address bar / history.
+  try { window.history.replaceState(null, '', window.location.pathname); } catch (e) {}
+
+  // ---- 1. popup flow ------------------------------------------------
+  if (window.opener && window.opener !== window) {
+    try {
+      window.opener.postMessage(
+        { source: 'genie-oauth', code: code, state: state, error: error, error_description: errorDescription },
+        window.location.origin
+      );
+      say(error ? 'Sign-in was not completed. You can close this window.' : 'Signed in. You can close this window.');
+      setTimeout(function () { window.close(); }, 400);
+      return;
+    } catch (e) { /* fall through to the full-page path */ }
+  }
+
+  // ---- 2. full-page flow --------------------------------------------
+  var pending = null;
+  try { pending = JSON.parse(sessionStorage.getItem('genie_oauth_pending') || 'null'); } catch (e) {}
+
+  if (error) { say('Sign-in failed: ' + (errorDescription || error)); return; }
+
+  if (!pending) {
+    say('Sign-in finished, but this window lost its connection to the chat page. Close it and use "Open chat in a new tab" from the chat panel.');
+    return;
+  }
+  if (!code || !state || state !== pending.state) {
+    say('Sign-in could not be verified (state mismatch). Please close this tab and try again.');
+    return;
+  }
+
+  say('Finishing sign-in…');
+  fetch('/api/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'authorization_code',
+      code: code,
+      code_verifier: pending.verifier,
+      redirect_uri: pending.redirectUri,
+    }),
+  })
+    .then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) { return { ok: res.ok, data: data }; });
+    })
+    .then(function (r) {
+      if (!r.ok || !r.data.access_token) {
+        throw new Error(r.data.error_description || r.data.error || 'Token exchange failed');
+      }
+      var session = {
+        access_token: r.data.access_token,
+        refresh_token: r.data.refresh_token || '',
+        id_token: r.data.id_token || '',
+        expires_at: Date.now() + (Number(r.data.expires_in) || 3600) * 1000,
+      };
+      localStorage.setItem('genie_oauth_v1:' + (pending.genieId || ''), JSON.stringify(session));
+      sessionStorage.removeItem('genie_oauth_pending');
+
+      var back = '/';
+      try {
+        var u = new URL(pending.returnUrl, window.location.origin);
+        if (u.origin === window.location.origin) back = u.pathname + u.search + u.hash;
+      } catch (e) {}
+      window.location.replace(back);
+    })
+    .catch(function (err) {
+      say('Sign-in failed: ' + err.message);
+    });
+})();
+</script>
+</body>
+</html>

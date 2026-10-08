@@ -1,151 +1,113 @@
-# Genie Connect
+# Genie Connect — Cloudflare Pages (one deploy, no server to run)
 
-A small console for testing a Workato Genie's headless chat API and resolving
-end user IDs by email — with all secrets held server-side.
+This is the "I don't want to host or manage a backend" version. One
+folder, one Cloudflare Pages project, one git push to deploy both the
+site and the API together.
 
 ```
-genie-connect-project/
-├── server.js          Express proxy — holds GENIE_API_KEY and IAM_API_TOKEN
-├── package.json
-├── .env.example       Copy to .env and fill in
-├── .gitignore
-└── public/
-    ├── index.html         Full console (Settings tab, empty Console tab, chat lives in the widget)
-    └── widget-embed.js    Standalone chat widget — a single <script> tag, for embedding on OTHER pages
+cloudflare-pages-deployment/
+└── public/              This whole folder is what gets deployed
+    ├── index.html        The console (same one as the local server.js version)
+    └── _worker.js         The API — see the big comment at its top for how this works
 ```
 
-This Express app is the local/dev version. Sibling folders hold the
-deployable versions this project grew into:
-- `cloudflare-pages-deployment/` — **the recommended way to actually run
-  this anywhere** — console + API as one Cloudflare Pages project, no
-  server to host or manage. See "Deploying this with nothing to host or
-  run" below.
-- `github-pages-deployment/` — an alternative split: static site on
-  GitHub Pages calling a separately-deployed Cloudflare Worker, with
-  Microsoft single sign-on. More moving parts; only worth it for silent
-  SSO.
-- `teams-bot/` — a separate, actual conversational **Teams bot** (chats in
-  a 1:1 Teams DM), built on Azure Functions + Bot Framework. Unrelated to
-  the tab — see its own README.
+## Why this isn't "hosting a backend"
 
-## Why a backend at all
+You're not running anything, not keeping a process alive, not patching an
+OS. `_worker.js` is a plain JavaScript file that Cloudflare's own
+infrastructure runs on demand, for free, whenever a request comes in for
+one of the `/api/...` paths — same as the static HTML is served on
+demand. There's no "server" to go down, restart, or sit idle costing
+money. This is genuinely closer to "upload code and it runs" than any
+traditional host (Render, Azure App Service, etc.) can be, because there
+is no process boundary between "my site" and "my backend" to manage —
+it's one deployment.
 
-The browser cannot call `genie-api.workato.com` or the IAM API directly with
-a bearer token — Workato's APIs aren't set up to accept cross-origin requests
-from arbitrary front-ends, and shipping a secret to client-side JS would
-expose it to anyone who opens dev tools. This server sits in between: the
-browser calls `localhost`, and the server attaches the real credentials
-before forwarding upstream.
+## One-time setup (all in the Cloudflare dashboard — no CLI required)
 
-## How auth works
+1. Push this `cloudflare-pages-deployment/` folder to a GitHub repo
+   (can be the same repo as everything else, this folder just needs to
+   be the one you point Cloudflare at).
+2. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages
+   → Create → Pages → Connect to Git** → pick the repo.
+3. Build settings:
+   - **Build command:** leave blank (nothing to build — it's already
+     plain HTML/JS).
+   - **Build output directory:** `cloudflare-pages-deployment/public`
+     (or `public` if you made this folder its own repo root).
+4. **Settings → Environment variables** → add, for Production:
+   - `GENIE_API_KEY` (click **Encrypt**)
+   - `IAM_API_TOKEN` (click **Encrypt**)
+   - `GENIE_ID` — e.g. `gin-AbMAK4r6-rXgonW-CD`
+   - `DATA_CENTER` — e.g. `www.workato.com`
+5. **Save and Deploy.** Cloudflare builds it and gives you a URL like
+   `https://genie-connect.pages.dev`.
 
-One flow: a server-side `GENIE_API_KEY` authenticates the app, and each
-request is scoped to a specific person via `X-IDP-User-ID`. You get that ID
-either by typing it directly or by looking it up from an email address (the
-console's "Look up ID by email" panel), which calls the IAM API using a
-separate `IAM_API_TOKEN` — also held server-side.
+From here on: every time you `git push`, Cloudflare automatically
+rebuilds and redeploys. You never log into anything, run a deploy
+command, or SSH anywhere again.
 
-## Setup
+## OAuth 2.0 (PKCE) mode — sign in with Workato Identity
+
+Instead of one shared API key plus an email lookup, each person signs in
+through Workato Identity and the widget calls the Headless API **as that
+user**. Chat history then comes from the Headless API itself (no Data Table).
+
+1. **Agent Studio → your genie → Chat interface → Custom chat interface**:
+   create the client with **OAuth 2.0 (PKCE)**. Set its redirect URL to
+   `https://genie-teams-dev.pages.dev/oauth-callback` (must match exactly,
+   or your own domain + `/oauth-callback`). Copy the **Client ID** with the
+   Copy button.
+2. **Pages → Settings → Environment variables**: add `OAUTH_CLIENT_ID`.
+   Optional: `OAUTH_REDIRECT_URI` (if not `<site>/oauth-callback`),
+   `OAUTH_SCOPE` (default `openid profile email` — never add
+   `offline_access`), `OAUTH_ISSUER` (default `https://id.workato.com`).
+3. Push to deploy. Check `/api/health` shows `oauthConfigured: true`.
+4. Use `/widget?auth=oauth&genie=gin-XXXX&name=My%20Genie`. Without
+   `auth=oauth` the widget behaves exactly as before (API key + email).
+
+A genie supports one attached client, so one deployment's `OAUTH_CLIENT_ID`
+serves one genie; `genie=` must be that genie's ID.
+
+How it works: the browser does the PKCE redirect (a popup when embedded in
+SharePoint, a normal redirect in its own tab); `/api/oauth/token` does the
+code/refresh exchange server-side (no client secret exists); `/api/headless/…`
+forwards the user's own Bearer token to `genie-api.workato.com` for an
+allow-listed set of paths. Access tokens last about an hour and refresh
+silently; refresh tokens rotate and are kept in the browser's localStorage.
+
+## Using it as a Microsoft Teams tab
+
+Same idea as before — point `teams-tab-manifest/manifest.json` (at the
+project root) at this URL instead of a Render/Azure one:
+- `staticTabs[0].contentUrl` and `websiteUrl` →
+  `https://genie-connect.pages.dev/`
+- `validDomains` → `["genie-connect.pages.dev"]`
+- (or your custom domain, if you add one under **Custom domains** in the
+  Pages project — either works, just make the manifest match whichever
+  URL you actually use)
+
+Then zip `manifest.json` + `color.png` + `outline.png` and sideload via
+**Teams → Apps → Upload a custom app**, same as documented at the
+project root. No Microsoft sign-in setup needed — identity still comes
+from the **Look up ID by email** panel already in Settings.
+
+## Local testing (optional)
 
 ```bash
-npm install
-cp .env.example .env
+npm install -g wrangler   # one-time
+cd cloudflare-pages-deployment
+wrangler pages dev public --binding GENIE_API_KEY=xxx --binding IAM_API_TOKEN=xxx --binding GENIE_ID=gin-... --binding DATA_CENTER=www.workato.com
 ```
-
-Fill in `.env`:
-
-```
-GENIE_API_KEY=<your genie's API key, from the genie build page>
-GENIE_ID=gin-AbMAK4r6-rXgonW-CD
-IAM_API_TOKEN=<a workspace API client token with Identity IAM scope>
-DATA_CENTER=www.workato.com
-```
-
-Then run:
-
-```bash
-npm start
-```
-
-Open **http://localhost:3000**.
-
-## What each route does
-
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/genie/conversations` | POST | Creates a conversation for a genie + end user, returns `conversation_id` |
-| `/api/genie/conversations/:id/messages` | POST | Sends a message and streams the reply back to the browser |
-| `/api/iam/users` | GET | Looks up a Workato Identity user by email (`?email=`, `?dataCenter=`) |
-| `/api/health` | GET | Reports whether `GENIE_API_KEY` / `IAM_API_TOKEN` are configured, without revealing them |
+This runs the exact same `_worker.js` + static files locally before you
+ever push anything. Skip this entirely if you'd rather just push and
+test on the real `.pages.dev` URL.
 
 ## Security notes
 
-- `.env` is git-ignored. Never commit real values from `.env.example`.
-- Set `ALLOWED_ORIGIN` in `.env` to your actual frontend origin before deploying anywhere beyond localhost — the default of `*` is for local testing only.
-- The IAM token and genie API key are workspace/genie-level credentials. Anyone who has them can read conversations or enumerate users, so keep `.env` out of any shared drive or repo.
-- **Rotate any credential that's ever been pasted into a chat, ticket, or document.** Treat it as seen by more people than intended, regardless of what the client is.
-
-## Deploying this with nothing to host or run
-
-**Recommended: `cloudflare-pages-deployment/`** — one Cloudflare Pages
-project serves the console *and* the API together. You connect a GitHub
-repo in Cloudflare's dashboard once; every `git push` after that rebuilds
-and redeploys automatically. There's no server process to start, keep
-alive, or patch — see that folder's own README for the exact
-click-by-click setup (about 5 minutes, all in a browser, no CLI needed).
-
-**Teams tab:** `teams-tab-manifest/` at this root packages the console as
-a personal Teams tab pointing at your `.pages.dev` URL — no Microsoft
-sign-in setup needed, identity comes from the **Look up ID by email**
-panel already in Settings. Fill in the URL + a fresh GUID in
-`manifest.json`, zip it with the two icons, sideload via **Teams → Apps
-→ Upload a custom app**.
-
-*(Two other folders exist for different needs, both more involved than
-the above: `github-pages-deployment/` splits the site and API into two
-separate pieces with Microsoft single sign-on — only worth it if you
-specifically want silent sign-in. `teams-bot/` is an actual
-conversational Teams bot via Azure Functions, not a tab at all. Neither
-is needed unless you have that specific requirement.)*
-
-## Embedding the widget on another page
-
-`public/widget-embed.js` is the chat bubble + popup only — no console, no
-settings, nothing else — meant to be dropped onto a page your own app
-already serves (e.g. a page registered as an Enterprise Application in
-Microsoft Entra ID). Add one script tag:
-
-```html
-<script
-  src="https://YOUR-GENIE-CONNECT-HOST/widget-embed.js"
-  data-base-url="https://YOUR-GENIE-CONNECT-HOST"
-  data-genie-id="gin-AbMAK4r6-rXgonW-CD"
-  data-interface-name=Smart Genie""
-  data-idp-user-id=""
-></script>
-```
-
-- `data-base-url` — required whenever the embedding page is on a different
-  origin than this server (it will be). Point it at wherever you deploy
-  this `server.js`.
-- `data-idp-user-id` — if your host page already knows the signed-in user
-  (e.g. resolved via your app's own Entra SSO), pass it here, or set it
-  after the fact:
-  ```js
-  window.GenieWidget.setUser("usr_2f8b1c...");
-  ```
-  If left blank, the widget asks for it once inline, no separate settings
-  page needed.
-- Also available: `window.GenieWidget.open()`, `.close()`, `.setGenieId(id)`.
-
-**Cross-origin:** since the embedding page and this server are different
-origins, set `ALLOWED_ORIGIN` in `.env` to that page's origin (or a
-comma-aware value your deployment enforces) so the browser's CORS check
-passes.
-
-**On Microsoft Entra's "My Apps" portal specifically:** that portal
-(myapplications.microsoft.com) only launches to a registered app's URL —
-it has no mechanism to host a third-party widget inside its own page
-chrome. This script is for the page your app itself serves once a user
-gets there, not for injecting into the My Apps portal directly.
-
+- `GENIE_API_KEY` / `IAM_API_TOKEN` live only as encrypted Pages
+  environment variables — never in this folder, never in git.
+- Nothing here needs CORS configuration — the site and the API are the
+  same origin by construction, so there's no cross-origin call to allow.
+- **Rotate either credential if it was ever pasted into a chat, ticket,
+  or document.**
