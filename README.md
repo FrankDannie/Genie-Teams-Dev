@@ -1,3 +1,5 @@
+# Link for the App: https://genie-teams-dev.pages.dev/
+
 # Genie Connect — Cloudflare Pages (one deploy, no server to run)
 
 This is the "I don't want to host or manage a backend" version. One
